@@ -657,16 +657,7 @@ export default function ChatPage() {
                 </span>
               )}
             </div>
-            <button
-              type="button"
-              onClick={() => handleNewChat('chat')}
-              className="inline-flex shrink-0 items-center gap-2 rounded-full border border-primary bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary transition-all hover:bg-primary hover:text-background"
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden>
-                <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-              </svg>
-              New
-            </button>
+          
             {active?.mode === 'sql' && (
               <button
                 type="button"

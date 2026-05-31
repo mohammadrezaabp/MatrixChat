@@ -1,26 +1,28 @@
 <svg width="180" height="180" viewBox="0 0 180 180" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <style>
-    @media (prefers-color-scheme: light) {
-      .background { fill: black; }
-      .foreground { fill: white; }
-    }
-    @media (prefers-color-scheme: dark) {
-      .background { fill: white; }
-      .foreground { fill: black; }
-    }
-  </style>
-  <g clip-path="url(#clip0_7960_43945)">
-    <rect class="background" width="180" height="180" rx="37" />
-    <g style="transform: scale(95%); transform-origin: center">
-      <path class="foreground"
-        d="M101.141 53H136.632C151.023 53 162.689 64.6662 162.689 79.0573V112.904H148.112V79.0573C148.112 78.7105 148.098 78.3662 148.072 78.0251L112.581 112.898C112.701 112.902 112.821 112.904 112.941 112.904H148.112V126.672H112.941C98.5504 126.672 86.5638 114.891 86.5638 100.5V66.7434H101.141V100.5C101.141 101.15 101.191 101.792 101.289 102.422L137.56 66.7816C137.255 66.7563 136.945 66.7434 136.632 66.7434H101.141V53Z" />
-      <path class="foreground"
-        d="M65.2926 124.136L14 66.7372H34.6355L64.7495 100.436V66.7372H80.1365V118.47C80.1365 126.278 70.4953 129.958 65.2926 124.136Z" />
-    </g>
+  <rect width="180" height="180" rx="36" fill="#020402"/>
+  <rect x="12" y="12" width="156" height="156" rx="28" fill="#041006" stroke="#0D2A12" stroke-width="2"/>
+
+  <g opacity="0.32" fill="#24FF6D" font-family="Consolas, 'Courier New', monospace" font-size="14" font-weight="700">
+    <text x="26" y="36">0</text>
+    <text x="46" y="50">1</text>
+    <text x="64" y="32">0</text>
+    <text x="84" y="46">1</text>
+    <text x="106" y="34">0</text>
+    <text x="126" y="48">1</text>
+    <text x="36" y="142">1</text>
+    <text x="58" y="154">0</text>
+    <text x="80" y="140">1</text>
+    <text x="102" y="154">0</text>
+    <text x="124" y="142">1</text>
   </g>
-  <defs>
-    <clipPath id="clip0_7960_43945">
-      <rect width="180" height="180" fill="white" />
-    </clipPath>
-  </defs>
+
+  <path d="M58 58H124" stroke="#1B5D2E" stroke-width="2" stroke-linecap="round"/>
+  <path d="M58 90H120" stroke="#1B5D2E" stroke-width="2" stroke-linecap="round"/>
+  <path d="M58 122H124" stroke="#1B5D2E" stroke-width="2" stroke-linecap="round"/>
+
+  <path d="M77 58L58 90L77 122" stroke="#3AFF84" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M104 58L123 90L104 122" stroke="#3AFF84" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="84" y="56" width="12" height="68" rx="6" fill="#2CF875"/>
+
+  <rect x="18" y="18" width="144" height="144" rx="24" stroke="#27F66E" stroke-opacity="0.25"/>
 </svg>

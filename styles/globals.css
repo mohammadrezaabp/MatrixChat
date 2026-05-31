@@ -1,3 +1,55 @@
+/* Matrix-style user icon effect */
+.matrix-user-effect {
+  filter: grayscale(0.1) contrast(1.5) brightness(0.7) drop-shadow(0 0 12px #00ff00cc) hue-rotate(80deg) saturate(3.5);
+  background: linear-gradient(120deg, #001a00 0%, #00ff00 100%);
+  box-shadow: 0 0 24px 4px #00ff00cc;
+  position: relative;
+}
+.matrix-user-effect::after {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; width: 100%; height: 100%;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0,255,0,0.08) 0px,
+    rgba(0,255,0,0.08) 2px,
+    transparent 2px,
+    transparent 6px
+  );
+  border-radius: 0.375rem;
+}
+/* MatrixChat custom styles */
+.text-matrix-green {
+  color: #00ff00;
+}
+.border-matrix-green {
+  border-color: #00ff00 !important;
+}
+.shadow-matrix-green\/30 {
+  box-shadow: 0 0 40px 0 #00ff0050 !important;
+}
+.bg-matrix-green {
+  background-color: #00ff00 !important;
+}
+.animate-matrix-bg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image: repeating-linear-gradient(
+    120deg,
+    rgba(0,255,0,0.08) 0px,
+    rgba(0,255,0,0.08) 2px,
+    transparent 2px,
+    transparent 40px
+  );
+  animation: matrix-bg-move 8s linear infinite;
+}
+@keyframes matrix-bg-move {
+  0% { background-position: 0 0, 0 0; }
+  100% { background-position: 200px 400px, 0 0; }
+}
 @import 'tailwindcss';
 @import 'tw-animate-css';
 

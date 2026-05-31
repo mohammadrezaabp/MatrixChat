@@ -56,9 +56,15 @@ export default function LoginPage() {
       </div>
 
       <section className="relative w-full max-w-md rounded-3xl border border-border bg-card/70 p-6 shadow-[0_20px_60px_-30px_rgba(0,255,0,0.45)] backdrop-blur sm:p-8">
-        <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Construct</p>
-        <h1 className="mt-2 text-2xl font-semibold">Sign In</h1>
-        <p className="mt-1 text-sm text-muted-foreground">Access your personal threads and messages.</p>
+        <img
+          src="/icon.svg"
+          alt="Construct logo"
+          className="mx-auto mb-4 h-16 w-16 rounded-2xl shadow-lg shadow-matrix-green/30"
+          draggable="false"
+        />
+        <p className="text-sm uppercase tracking-[0.2em] text-matrix-green/80">MatrixChat</p>
+        <h1 className="mt-4 text-4xl font-extrabold text-matrix-green drop-shadow-lg">Sign In</h1>
+        <p className="mt-2 text-lg text-matrix-green/70">Access your personal threads and messages.</p>
 
         <form className="mt-6 space-y-4" onSubmit={onSubmit}>
           <label className="block">

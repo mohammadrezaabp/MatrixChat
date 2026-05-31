@@ -12,6 +12,8 @@ interface ChatMessageProps {
 export function ChatMessage({ role, content, isLoading, isSql }: ChatMessageProps) {
   const [copied, setCopied] = useState(false)
   const isUser = role === 'user'
+  const logo = '/icon.svg'
+  const userIcon = '/matrix-user.svg'
 
   const handleCopy = async () => {
     try {
@@ -24,14 +26,19 @@ export function ChatMessage({ role, content, isLoading, isSql }: ChatMessageProp
   }
   
   return (
-    <div className={`mb-4 flex animate-fadeIn ${isUser ? 'flex-row-reverse justify-start gap-2' : 'justify-start gap-4'}`} dir="ltr">
+    <div className={`mb-4 flex animate-fadeIn ${isUser ? 'flex-row-reverse justify-start gap-1' : 'justify-start gap-1'}`} dir="ltr">
       {/* Avatar/Marker */}
-      <div className={`flex-shrink-0 flex h-9 w-9 items-center justify-center rounded-full border ${
-        isUser 
-          ? 'border-primary/60 bg-primary/10 text-primary' 
-          : 'border-secondary/60 bg-secondary/10 text-secondary'
-      }`}>
-        <span className="text-xs font-semibold">{isUser ? 'You' : 'AI'}</span>
+      <div className="flex-shrink-0 flex h-14 w-14 items-center justify-center">
+        {isUser ? (
+          <img
+            src={userIcon}
+            alt="User Icon"
+            className="h-12 w-12 rounded-lg object-cover matrix-user-effect"
+            draggable="false"
+          />
+        ) : (
+          <img src={logo} alt="AI Logo" className="h-16 w-16 rounded-xl shadow-2xl bg-black p-1" draggable="false" />
+        )}
       </div>
       
       {/* Message Content */}
@@ -63,7 +70,7 @@ export function ChatMessage({ role, content, isLoading, isSql }: ChatMessageProp
           )}
         </div>
         <div className={`mt-1 flex w-fit items-center gap-2 text-xs text-muted-foreground ${isUser ? 'self-end' : 'self-start'}`}>
-          <span>{isUser ? 'You' : 'Ai Assistant'}</span>
+          {/* Removed user/AI icon near copy icon */}
           {content && !isLoading && (
             <button
               type="button"
