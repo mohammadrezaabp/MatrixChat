@@ -8,6 +8,7 @@ services:
       - ollama_data:/root/.ollama
     environment:
       - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_KEEP_ALIVE=60m
     restart: unless-stopped
 
   backend:
@@ -19,7 +20,12 @@ services:
       - "8000:8000"
     environment:
       - OLLAMA_API_URL=http://ollama:11434
-      - MODEL_NAME=llama3.2
+      - CHAT_MODEL_NAME=llama3.2:1b
+      - SQL_MODEL_NAME=qwen2.5-coder:1.5b
+      - OLLAMA_KEEP_ALIVE=60m
+      - CHAT_NUM_CTX=2048
+      - SQL_NUM_CTX=1536
+      - PULL_MODELS=false
       - LOCAL_ONLY=true
     depends_on:
       - ollama
