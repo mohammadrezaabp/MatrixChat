@@ -8,7 +8,7 @@ const _geistMono = Geist_Mono({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: 'Matrix Chat',
-  description: 'Chat with Llama 3.2 in Matrix style',
+  description: 'English-first chat and text-to-SQL assistant powered by Llama 3.2',
   generator: 'v0.app',
   icons: {
     icon: [
@@ -35,8 +35,8 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en" className="dark bg-background">
-      <body className="font-mono antialiased bg-background text-foreground">
+    <html lang="en" dir="ltr" className="dark bg-background">
+      <body className="font-sans antialiased bg-background text-foreground">
         {children}
         {process.env.NODE_ENV === 'production' && <Analytics />}
       </body>

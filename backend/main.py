@@ -22,6 +22,16 @@ OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://host.docker.internal:11434"
 MODEL_NAME = os.getenv("MODEL_NAME", "llama3.2")
 SCHEMA_FILE = os.path.join(os.path.dirname(__file__), "MySqlSchema.sql")
 
+CHAT_SYSTEM_PROMPT = (
+    "You are a helpful English-language assistant. Reply in clear, natural English. "
+    "Keep answers concise unless the user asks for more detail."
+)
+
+SQL_SYSTEM_PROMPT = (
+    "You are a helpful English-language assistant that converts natural language requests into valid MySQL. "
+    "Return only the SQL query and nothing else."
+)
+
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -94,8 +104,8 @@ async def text_to_sql(request: TextToSqlRequest) -> TextToSqlResponse:
     """Convert natural language query to SQL using the database schema"""
     try:
         schema = read_schema()
-        
-        prompt = f"""You are a SQL expert. Given the following database schema, generate ONLY a valid MySQL SQL query for the user's request.
+
+        prompt = f"""{SQL_SYSTEM_PROMPT}
 
 DATABASE SCHEMA:
 {schema}
@@ -156,7 +166,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
     """Chat endpoint that connects to Ollama"""
     try:
         # Format messages for Ollama
-        messages = [
+        messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}] + [
             {"role": msg.role, "content": msg.content}
             for msg in request.messages
         ]

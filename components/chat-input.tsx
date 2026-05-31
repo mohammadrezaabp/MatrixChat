@@ -34,15 +34,14 @@ export function ChatInput({ onSubmit, isLoading, disabled, placeholder }: ChatIn
   }
 
   return (
-    <div className="border-t-2 border-primary pt-4">
-      <div className={`border-2 transition-all ${
-        isFocused ? 'border-primary shadow-lg shadow-primary/50' : 'border-muted'
+    <div className="rounded-3xl border border-border bg-card/60 p-3 shadow-[0_16px_40px_-24px_rgba(0,0,0,0.55)] sm:p-4">
+      <div className={`rounded-2xl border transition-all ${
+        isFocused ? 'border-primary shadow-lg shadow-primary/15' : 'border-border'
       }`}>
-        <form onSubmit={handleSubmit} className="bg-input p-3">
-          <div className="flex gap-2 items-end">
-            <span className="text-primary text-sm font-mono">{'>'}</span>
+        <form onSubmit={handleSubmit} className="rounded-2xl bg-background/70 p-3">
+          <div className="flex items-end gap-3">
             <textarea
-              dir="rtl"
+              dir="ltr"
               ref={inputRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -54,27 +53,24 @@ export function ChatInput({ onSubmit, isLoading, disabled, placeholder }: ChatIn
                   handleSubmit(e as any)
                 }
               }}
-              placeholder={placeholder || 'پیام خود را وارد کنید...'}
+              placeholder={placeholder || 'Type your message...'}
               disabled={isLoading || disabled}
-              className="flex-1 bg-transparent text-primary placeholder-muted-foreground outline-none resize-none font-mono text-sm min-h-6 max-h-32 text-right"
+              className="flex-1 min-h-8 max-h-40 resize-none bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
               rows={1}
             />
             <button
               type="submit"
               disabled={isLoading || !input.trim() || disabled}
-              className={`px-3 py-1 border-2 font-bold text-xs transition-all whitespace-nowrap ${
+              className={`rounded-full border px-4 py-2 text-sm font-medium transition-all whitespace-nowrap ${
                 isLoading || !input.trim() || disabled
-                  ? 'border-muted text-muted-foreground cursor-not-allowed opacity-50'
-                  : 'border-primary text-primary hover:bg-primary hover:text-black hover:shadow-lg hover:shadow-primary/50'
+                  ? 'border-border text-muted-foreground cursor-not-allowed opacity-50'
+                  : 'border-primary bg-primary text-background hover:-translate-y-0.5 hover:shadow-lg hover:shadow-primary/20'
               }`}
             >
-              {isLoading ? 'در حال پردازش...' : 'ارسال'}
+              {isLoading ? 'Sending...' : 'Send'}
             </button>
           </div>
         </form>
-      </div>
-      <div className="text-xs text-muted-foreground mt-2 text-left">
-        برای ارسال اینتر بزنید | شیفت+اینتر برای خط جدید
       </div>
     </div>
   )

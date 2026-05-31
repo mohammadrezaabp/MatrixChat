@@ -19,38 +19,38 @@ export function ChatMessage({ role, content, isLoading, isSql }: ChatMessageProp
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     } catch (error) {
-      console.error('کپی ناموفق بود', error)
+      console.error('Copy failed', error)
     }
   }
   
   return (
-    <div className={`flex gap-4 mb-4 animate-fadeIn ${isUser ? 'flex-row-reverse' : ''}`} dir="rtl">
+    <div className={`mb-4 flex animate-fadeIn gap-4 ${isUser ? 'justify-end' : 'justify-start'}`} dir="ltr">
       {/* Avatar/Marker */}
-      <div className={`flex-shrink-0 w-8 h-8 flex items-center justify-center border-2 ${
+      <div className={`flex-shrink-0 flex h-9 w-9 items-center justify-center rounded-full border ${
         isUser 
-          ? 'border-primary text-primary' 
-          : 'border-secondary text-secondary'
+          ? 'border-primary/60 bg-primary/10 text-primary' 
+          : 'border-secondary/60 bg-secondary/10 text-secondary'
       }`}>
-        <span className="text-xs font-bold">{isUser ? '>' : '$'}</span>
+        <span className="text-xs font-semibold">{isUser ? 'You' : 'AI'}</span>
       </div>
       
       {/* Message Content */}
-      <div className="flex-1 text-right">
-        <div className={`relative inline-block max-w-xs md:max-w-md lg:max-w-lg px-4 py-2 border-2 ${
+      <div className="flex-1 max-w-[85%]">
+        <div className={`relative inline-block max-w-xs border px-4 py-3 md:max-w-md lg:max-w-lg ${
           isUser
-            ? 'border-primary bg-black text-primary'
-            : 'border-secondary bg-black text-secondary'
+            ? 'border-primary/40 bg-primary/5 text-foreground'
+            : 'border-border bg-card/80 text-foreground'
         }`}>
           {isSql ? (
             <div className="relative group w-full">
               <button
                 type="button"
                 onClick={handleCopy}
-                aria-label={copied ? 'کپی شد' : 'کپی'}
-                className={`absolute top-2 right-2 z-10 flex items-center justify-center w-9 h-9 rounded-md transition-all duration-150 border ${
+                aria-label={copied ? 'Copied' : 'Copy'}
+                className={`absolute right-2 top-2 z-10 flex h-9 w-9 items-center justify-center rounded-md border transition-all duration-150 ${
                   copied
-                    ? 'bg-green-900/60 border-green-600 text-green-300 shadow-[0_8px_24px_-8px_rgba(16,185,129,0.4)]'
-                    : 'bg-black/60 border-slate-700 text-slate-200 opacity-0 group-hover:opacity-100 hover:bg-slate-800/90 hover:scale-105'
+                    ? 'border-green-500 bg-green-500/15 text-green-300 shadow-[0_8px_24px_-8px_rgba(16,185,129,0.35)]'
+                    : 'border-border bg-background/80 text-muted-foreground opacity-0 group-hover:opacity-100 hover:scale-105 hover:bg-card'
                 }`}
               >
                 {copied ? (
@@ -67,18 +67,18 @@ export function ChatMessage({ role, content, isLoading, isSql }: ChatMessageProp
 
               {/* Success tooltip */}
               {copied && (
-                <div className="absolute top-2 right-12 z-20 rounded bg-green-900/90 px-2 py-1 text-xs text-green-100">
-                  کپی شد
+                <div className="absolute right-12 top-2 z-20 rounded bg-green-600/90 px-2 py-1 text-xs text-white">
+                  Copied
                 </div>
               )}
 
               <div className="mb-2" />
-              <pre dir="ltr" className="min-h-[120px] overflow-x-auto whitespace-pre-wrap break-words text-sm font-mono text-slate-100 pb-3 px-3 pt-6 border-t border-t-transparent">
+              <pre dir="ltr" className="min-h-[120px] overflow-x-auto whitespace-pre-wrap break-words border-t border-t-transparent px-3 pb-3 pt-6 text-sm font-mono text-foreground">
                 {content}
               </pre>
             </div>
           ) : (
-            <p className="text-sm md:text-base whitespace-pre-wrap break-words">
+            <p className="whitespace-pre-wrap break-words text-left text-sm md:text-base">
               {isLoading ? (
                 <span className="inline-flex gap-1">
                   <span className="animate-pulse">▮</span>
@@ -91,8 +91,8 @@ export function ChatMessage({ role, content, isLoading, isSql }: ChatMessageProp
             </p>
           )}
         </div>
-        <div className={`text-xs mt-1 ${isUser ? 'text-muted-foreground mr-2' : 'text-muted-foreground ml-2'}`}>
-          {isUser ? 'کاربر' : 'لاما'}
+        <div className={`mt-1 text-xs text-muted-foreground ${isUser ? 'text-right' : 'text-left'}`}>
+          {isUser ? 'User' : 'Assistant'}
         </div>
       </div>
     </div>
