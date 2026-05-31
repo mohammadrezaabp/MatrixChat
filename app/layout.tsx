@@ -7,7 +7,7 @@ const _geist = Geist({ subsets: ["latin"] });
 const _geistMono = Geist_Mono({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: 'Matrix Chat',
+  title: 'Construct',
   description: 'English-first chat and text-to-SQL assistant powered by Llama 3.2',
   generator: 'v0.app',
   icons: {

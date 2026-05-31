@@ -1,0 +1,133 @@
+'use client'
+
+import Link from 'next/link'
+import { useRouter } from 'next/navigation'
+import { FormEvent, useEffect, useState } from 'react'
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+
+export default function RegisterPage() {
+  const router = useRouter()
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+
+  useEffect(() => {
+    fetch(`${API_URL}/auth/me`, { credentials: 'include' })
+      .then((res) => {
+        if (res.ok) router.replace('/')
+      })
+      .catch(() => undefined)
+  }, [router])
+
+  const onSubmit = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    if (submitting) return
+
+    if (password !== confirmPassword) {
+      setError('Passwords do not match')
+      return
+    }
+
+    setSubmitting(true)
+    setError(null)
+
+    try {
+      const res = await fetch(`${API_URL}/auth/register`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      })
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.detail || 'Registration failed')
+      }
+
+      router.replace('/')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Registration failed')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <main className="relative grid min-h-dvh place-items-center overflow-hidden bg-background px-4 py-10 text-foreground">
+      <div className="pointer-events-none absolute inset-0 opacity-30" aria-hidden>
+        <div className="absolute -left-20 top-0 h-64 w-64 rounded-full bg-primary/20 blur-3xl" />
+        <div className="absolute -right-20 bottom-0 h-72 w-72 rounded-full bg-secondary/20 blur-3xl" />
+      </div>
+
+      <section className="relative w-full max-w-md rounded-3xl border border-border bg-card/70 p-6 shadow-[0_20px_60px_-30px_rgba(0,255,0,0.45)] backdrop-blur sm:p-8">
+        <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Construct</p>
+        <h1 className="mt-2 text-2xl font-semibold">Create Account</h1>
+        <p className="mt-1 text-sm text-muted-foreground">Your threads and messages stay scoped to your user.</p>
+
+        <form className="mt-6 space-y-4" onSubmit={onSubmit}>
+          <label className="block">
+            <span className="mb-1 block text-xs uppercase tracking-wide text-muted-foreground">Username</span>
+            <input
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              required
+              minLength={3}
+              autoComplete="username"
+              className="w-full rounded-xl border border-border bg-background/60 px-3 py-2 text-sm outline-none transition-colors focus:border-primary"
+            />
+          </label>
+
+          <label className="block">
+            <span className="mb-1 block text-xs uppercase tracking-wide text-muted-foreground">Password</span>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              minLength={6}
+              autoComplete="new-password"
+              className="w-full rounded-xl border border-border bg-background/60 px-3 py-2 text-sm outline-none transition-colors focus:border-primary"
+            />
+          </label>
+
+          <label className="block">
+            <span className="mb-1 block text-xs uppercase tracking-wide text-muted-foreground">Confirm password</span>
+            <input
+              type="password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              required
+              minLength={6}
+              autoComplete="new-password"
+              className="w-full rounded-xl border border-border bg-background/60 px-3 py-2 text-sm outline-none transition-colors focus:border-primary"
+            />
+          </label>
+
+          {error && (
+            <p className="rounded-xl border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {error}
+            </p>
+          )}
+
+          <button
+            type="submit"
+            disabled={submitting}
+            className="w-full rounded-xl border border-primary bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70"
+          >
+            {submitting ? 'Creating account...' : 'Create account'}
+          </button>
+        </form>
+
+        <p className="mt-5 text-sm text-muted-foreground">
+          Already have an account?{' '}
+          <Link href="/login" className="text-primary underline-offset-4 hover:underline">
+            Sign in
+          </Link>
+        </p>
+      </section>
+    </main>
+  )
+}

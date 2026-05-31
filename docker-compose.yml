@@ -46,6 +46,8 @@ services:
       - PULL_MODELS=false
       - LOCAL_ONLY=true
       - DATABASE_URL=postgresql://matrixchat:matrixchat@postgres:5432/matrixchat
+      - AUTH_SECRET=change-this-secret-in-production
+      - SESSION_TTL_SECONDS=604800
     depends_on:
       postgres:
         condition: service_healthy
