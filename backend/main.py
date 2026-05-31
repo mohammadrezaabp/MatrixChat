@@ -51,16 +51,20 @@ CHAT_SYSTEM_PROMPT = (
 )
 
 SQL_SYSTEM_PROMPT = (
-    "You are a senior database engineer having an iterative conversation with a user. "
-    "Convert the user's LATEST request into ONE valid MySQL "
-    "SELECT/INSERT/UPDATE/DELETE statement that runs against the given schema. "
-    "If a previous SQL query was produced earlier in the conversation, treat the latest "
-    "request as a REFINEMENT of that query (e.g. add a column, change a filter, add a "
-    "join) and modify it accordingly instead of starting from scratch \u2014 unless the "
-    "user clearly asks for something unrelated. "
-    "Output ONLY the final SQL, terminated with a single semicolon. No prose, no markdown, "
+    "You are a senior database engineer. Convert the user request into ONE valid "
+    "SQL SELECT/INSERT/UPDATE/DELETE statement that runs against the given schema. "
+    "Output ONLY the SQL, terminated with a single semicolon. No prose, no markdown, "
     "no comments, no explanations, no code fences."
 )
+
+# Keywords that strongly signal the user wants to MODIFY the previous query.
+_REFINE_KEYWORDS = {
+    "also", "add", "include", "remove", "exclude", "change", "modify",
+    "update", "additionally", "besides", "along with", "as well",
+    "instead", "replace", "without", "and show", "and get", "and add",
+    "now filter", "now only", "now sort", "now order", "now group",
+    "but only", "but filter", "but add", "but also",
+}
 
 SQL_RULES = (
     "Rules:\n"
@@ -242,6 +246,55 @@ async def health():
         "sql_model": SQL_MODEL_NAME,
     }
 
+def _keyword_intent(request: str) -> Optional[bool]:
+    """Fast keyword pre-check. True=refine, False=fresh, None=ambiguous."""
+    lower = request.lower()
+    if any(kw in lower for kw in _REFINE_KEYWORDS):
+        return True
+    return None
+
+
+async def classify_intent(client: httpx.AsyncClient, model: str,
+                          last_sql: str, new_request: str) -> bool:
+    """
+    Ask the model whether new_request is a REFINEMENT of last_sql or a NEW query.
+    Uses a tiny forced-choice prompt with num_predict=4 so it's very fast.
+    Returns True if REFINE, False if NEW.
+    """
+    prompt = (
+        "Decide if the new database request should REFINE the existing SQL or start as a NEW query.\n\n"
+        f"Existing SQL: {last_sql}\n"
+        f"New request: {new_request}\n\n"
+        "Reply with exactly one word.\n"
+        "- If the request adds/changes/removes something in the existing SQL → REFINE\n"
+        "- If the request is about completely different data or a new unrelated question → NEW\n"
+        "Answer:"
+    )
+    try:
+        resp = await client.post(
+            f"{OLLAMA_API_URL}/api/generate",
+            json={
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "keep_alive": KEEP_ALIVE,
+                "options": {
+                    "num_predict": 4,
+                    "temperature": 0.0,
+                    "num_ctx": 512,
+                },
+            },
+        )
+        if resp.status_code == 200:
+            answer = resp.json().get("response", "").strip().upper()
+            print(f"[sql] intent classifier answer: {answer!r}")
+            return "REFINE" in answer
+    except Exception as exc:
+        print(f"[sql] intent classifier failed: {exc}")
+    # Default to fresh query on any error.
+    return False
+
+
 def extract_last_sql(messages: Optional[list[TextToSqlMessage]],
                      current_query: str) -> Optional[str]:
     """Return the most recent valid SQL from the conversation history, or None."""
@@ -278,7 +331,22 @@ async def text_to_sql(request: TextToSqlRequest) -> TextToSqlResponse:
         model = request.model or SQL_MODEL_NAME
         last_sql = extract_last_sql(request.messages, request.query)
 
+        # Determine intent: refine the last SQL or generate a fresh one.
+        is_refinement = False
         if last_sql:
+            kw = _keyword_intent(request.query)
+            if kw is True:
+                is_refinement = True
+                print(f"[sql] intent=REFINE (keyword match)")
+            elif kw is False:
+                is_refinement = False
+                print(f"[sql] intent=NEW (keyword match)")
+            else:
+                # Ambiguous — ask the model.
+                async with httpx.AsyncClient(timeout=60) as clf_client:
+                    is_refinement = await classify_intent(clf_client, model, last_sql, request.query)
+
+        if is_refinement and last_sql:
             print(f"[sql] refining prior SQL: {last_sql!r}")
             task_block = (
                 f"### Current query\n{last_sql}\n\n"
