@@ -21,8 +21,6 @@ interface Thread {
 }
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-const STORAGE_KEY = 'matrixchat.threads.v1'
-const ACTIVE_KEY = 'matrixchat.activeId.v1'
 
 function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
@@ -55,45 +53,73 @@ function deriveTitle(text: string): string {
   return clean.length > 48 ? clean.slice(0, 48) + '…' : clean
 }
 
+// ---------------------------------------------------------------------------
+// API helpers
+// ---------------------------------------------------------------------------
+async function apiListThreads(): Promise<Thread[]> {
+  const res = await fetch(`${API_URL}/threads`)
+  if (!res.ok) throw new Error(`Failed to load threads: ${res.status}`)
+  return res.json()
+}
+
+async function apiSaveThread(thread: Thread): Promise<void> {
+  await fetch(`${API_URL}/threads/${thread.id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ thread }),
+  })
+}
+
+async function apiDeleteThread(id: string): Promise<void> {
+  await fetch(`${API_URL}/threads/${id}`, { method: 'DELETE' })
+}
+
 export default function ChatPage() {
   const [threads, setThreads] = useState<Thread[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [hydrated, setHydrated] = useState(false)
+  const [backendOnline, setBackendOnline] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  // Track which thread id was last saved so we only PUT when something changed.
+  const lastSaved = useRef<Record<string, number>>({})
 
-  // Hydrate from localStorage on mount
+  // Load threads from backend on mount
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY)
-      const parsed: Thread[] = raw ? JSON.parse(raw) : []
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        setThreads(parsed)
-        const savedActive = localStorage.getItem(ACTIVE_KEY)
-        const exists = parsed.find(t => t.id === savedActive)
-        setActiveId(exists ? exists.id : parsed[0].id)
-      } else {
+    apiListThreads()
+      .then(loaded => {
+        setBackendOnline(true)
+        if (loaded.length > 0) {
+          setThreads(loaded)
+          setActiveId(loaded[0].id)
+        } else {
+          const t = newThread('chat')
+          setThreads([t])
+          setActiveId(t.id)
+          apiSaveThread(t).catch(console.error)
+        }
+      })
+      .catch(() => {
+        // Backend unavailable — fall back to a local thread so the UI still works.
+        setBackendOnline(false)
         const t = newThread('chat')
         setThreads([t])
         setActiveId(t.id)
-      }
-    } catch {
-      const t = newThread('chat')
-      setThreads([t])
-      setActiveId(t.id)
-    }
-    setHydrated(true)
+      })
+      .finally(() => setHydrated(true))
   }, [])
 
-  // Persist
+  // Persist changed threads to backend (only when backend is reachable)
   useEffect(() => {
-    if (!hydrated) return
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(threads))
-      if (activeId) localStorage.setItem(ACTIVE_KEY, activeId)
-    } catch {}
-  }, [threads, activeId, hydrated])
+    if (!hydrated || !backendOnline) return
+    for (const t of threads) {
+      if (lastSaved.current[t.id] !== t.updatedAt) {
+        lastSaved.current[t.id] = t.updatedAt
+        apiSaveThread(t).catch(console.error)
+      }
+    }
+  }, [threads, hydrated, backendOnline])
 
   const active = threads.find(t => t.id === activeId) || null
 
@@ -114,9 +140,11 @@ export default function ChatPage() {
     setThreads(prev => [t, ...prev])
     setActiveId(t.id)
     setError(null)
+    if (backendOnline) apiSaveThread(t).catch(console.error)
   }
 
   const handleDelete = (id: string) => {
+    if (backendOnline) apiDeleteThread(id).catch(console.error)
     setThreads(prev => {
       const next = prev.filter(t => t.id !== id)
       if (id === activeId) {
@@ -125,6 +153,7 @@ export default function ChatPage() {
         } else {
           const t = newThread('chat')
           setActiveId(t.id)
+          if (backendOnline) apiSaveThread(t).catch(console.error)
           return [t]
         }
       }

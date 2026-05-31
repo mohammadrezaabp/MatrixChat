@@ -11,6 +11,24 @@ services:
       - OLLAMA_KEEP_ALIVE=60m
     restart: unless-stopped
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: matrix-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=matrixchat
+      - POSTGRES_PASSWORD=matrixchat
+      - POSTGRES_DB=matrixchat
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U matrixchat"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   backend:
     build:
       context: ./backend
@@ -27,11 +45,16 @@ services:
       - SQL_NUM_CTX=1536
       - PULL_MODELS=false
       - LOCAL_ONLY=true
+      - DATABASE_URL=postgresql://matrixchat:matrixchat@postgres:5432/matrixchat
     depends_on:
-      - ollama
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
     volumes:
       - ./backend:/app
     restart: unless-stopped
 
 volumes:
   ollama_data:
+  postgres_data:

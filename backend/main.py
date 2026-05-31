@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -9,6 +9,70 @@ import os
 from functools import lru_cache
 from typing import Optional
 import re
+from datetime import datetime, timezone
+
+from sqlalchemy import (
+    create_engine, Column, String, Boolean, Integer, Text, BigInteger,
+    ForeignKey, text
+)
+from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
+
+# ---------------------------------------------------------------------------
+# Database setup
+# ---------------------------------------------------------------------------
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+engine = None
+SessionLocal = None
+
+if DATABASE_URL:
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class ThreadModel(Base):
+    __tablename__ = "threads"
+    id        = Column(String, primary_key=True)
+    title     = Column(String, nullable=False)
+    mode      = Column(String, nullable=False)          # 'chat' | 'sql'
+    updated_at = Column(BigInteger, nullable=False)     # epoch ms
+    messages  = relationship("MessageModel", back_populates="thread",
+                             cascade="all, delete-orphan",
+                             order_by="MessageModel.position")
+
+
+class MessageModel(Base):
+    __tablename__ = "messages"
+    id         = Column(String, primary_key=True)
+    thread_id  = Column(String, ForeignKey("threads.id", ondelete="CASCADE"),
+                        nullable=False, index=True)
+    role       = Column(String, nullable=False)          # 'user' | 'assistant'
+    content    = Column(Text, nullable=False, default="")
+    is_sql     = Column(Boolean, nullable=False, default=False)
+    position   = Column(Integer, nullable=False, default=0)  # ordering within thread
+    thread     = relationship("ThreadModel", back_populates="messages")
+
+
+def get_db():
+    if SessionLocal is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def init_db():
+    if engine is not None:
+        Base.metadata.create_all(bind=engine)
+        print("[db] tables ready")
+    else:
+        print("[db] DATABASE_URL not set, skipping DB init")
 
 app = FastAPI()
 
@@ -114,6 +178,25 @@ class TextToSqlResponse(BaseModel):
     sql: str
     query: str
     model: str
+
+# ---------------------------------------------------------------------------
+# Thread / Message API Pydantic schemas
+# ---------------------------------------------------------------------------
+class MessageSchema(BaseModel):
+    id: str
+    role: str
+    content: str
+    isSql: bool = False
+
+class ThreadSchema(BaseModel):
+    id: str
+    title: str
+    mode: str
+    updatedAt: int
+    messages: list[MessageSchema] = []
+
+class UpsertThreadRequest(BaseModel):
+    thread: ThreadSchema
 
 def read_schema() -> str:
     """Read the MySQL schema from file"""
@@ -232,6 +315,7 @@ async def warm_model(model: str, num_ctx: int) -> None:
 
 @app.on_event("startup")
 async def startup_warmup() -> None:
+    init_db()
     # Don't block startup — warm in the background.
     asyncio.create_task(warm_model(CHAT_MODEL_NAME, CHAT_NUM_CTX))
     asyncio.create_task(warm_model(SQL_MODEL_NAME, SQL_NUM_CTX))
@@ -245,6 +329,75 @@ async def health():
         "chat_model": CHAT_MODEL_NAME,
         "sql_model": SQL_MODEL_NAME,
     }
+
+# ---------------------------------------------------------------------------
+# Thread CRUD endpoints
+# ---------------------------------------------------------------------------
+
+def _thread_to_schema(t: ThreadModel) -> ThreadSchema:
+    return ThreadSchema(
+        id=t.id,
+        title=t.title,
+        mode=t.mode,
+        updatedAt=t.updated_at,
+        messages=[
+            MessageSchema(id=m.id, role=m.role, content=m.content, isSql=m.is_sql)
+            for m in t.messages
+        ],
+    )
+
+
+@app.get("/threads", response_model=list[ThreadSchema])
+def list_threads(db: Session = Depends(get_db)):
+    threads = db.query(ThreadModel).order_by(ThreadModel.updated_at.desc()).all()
+    return [_thread_to_schema(t) for t in threads]
+
+
+@app.get("/threads/{thread_id}", response_model=ThreadSchema)
+def get_thread(thread_id: str, db: Session = Depends(get_db)):
+    t = db.get(ThreadModel, thread_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    return _thread_to_schema(t)
+
+
+@app.put("/threads/{thread_id}", response_model=ThreadSchema)
+def upsert_thread(thread_id: str, body: UpsertThreadRequest,
+                  db: Session = Depends(get_db)):
+    t = db.get(ThreadModel, thread_id)
+    data = body.thread
+    if t is None:
+        t = ThreadModel(id=data.id, title=data.title, mode=data.mode,
+                        updated_at=data.updatedAt)
+        db.add(t)
+    else:
+        t.title = data.title
+        t.mode = data.mode
+        t.updated_at = data.updatedAt
+        # Delete existing messages; we replace them wholesale.
+        db.query(MessageModel).filter(MessageModel.thread_id == thread_id).delete()
+
+    for pos, msg in enumerate(data.messages):
+        db.add(MessageModel(
+            id=msg.id,
+            thread_id=data.id,
+            role=msg.role,
+            content=msg.content,
+            is_sql=msg.isSql,
+            position=pos,
+        ))
+    db.commit()
+    db.refresh(t)
+    return _thread_to_schema(t)
+
+
+@app.delete("/threads/{thread_id}", status_code=204)
+def delete_thread(thread_id: str, db: Session = Depends(get_db)):
+    t = db.get(ThreadModel, thread_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    db.delete(t)
+    db.commit()
 
 def _keyword_intent(request: str) -> Optional[bool]:
     """Fast keyword pre-check. True=refine, False=fresh, None=ambiguous."""
