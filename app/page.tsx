@@ -35,6 +35,8 @@ interface UserSchema {
 }
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+const ACTIVE_THREAD_STORAGE_KEY = 'construct.activeThreadId'
+const WELCOME_TEXT = 'Welcome to Construct...'
 
 function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
@@ -105,6 +107,24 @@ async function apiLogout(): Promise<void> {
   })
 }
 
+async function apiUpdateProfile(params: {
+  currentPassword: string
+  username?: string
+  newPassword?: string
+}): Promise<AuthUser> {
+  const res = await fetch(`${API_URL}/auth/profile`, {
+    method: 'PUT',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}))
+    throw new Error(data.detail || `Failed to update profile: ${res.status}`)
+  }
+  return res.json()
+}
+
 async function apiListSchemas(): Promise<UserSchema[]> {
   const res = await fetch(`${API_URL}/schemas`, { credentials: 'include' })
   if (!res.ok) throw new Error(`Failed to load schemas: ${res.status}`)
@@ -164,9 +184,18 @@ export default function ChatPage() {
   const [editingSchemaId, setEditingSchemaId] = useState<string | null>(null)
   const [schemaEditorOpen, setSchemaEditorOpen] = useState(false)
   const [isSavingSchema, setIsSavingSchema] = useState(false)
+  const [profileEditorOpen, setProfileEditorOpen] = useState(false)
+  const [profileUsername, setProfileUsername] = useState('')
+  const [profileCurrentPassword, setProfileCurrentPassword] = useState('')
+  const [profileNewPassword, setProfileNewPassword] = useState('')
+  const [profileConfirmPassword, setProfileConfirmPassword] = useState('')
+  const [isSavingProfile, setIsSavingProfile] = useState(false)
   const [hydrated, setHydrated] = useState(false)
   const [backendOnline, setBackendOnline] = useState(false)
+  const [typedWelcome, setTypedWelcome] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const schemaTextAreaRef = useRef<HTMLTextAreaElement>(null)
+  const schemaGutterRef = useRef<HTMLDivElement>(null)
   // Track which thread id was last saved so we only PUT when something changed.
   const lastSaved = useRef<Record<string, number>>({})
 
@@ -194,16 +223,20 @@ export default function ChatPage() {
         setSchemas(loadedSchemas)
 
         setBackendOnline(true)
-        if (loaded.length > 0) {
-          setThreads(loaded)
-          setActiveId(loaded[0].id)
-          if (loaded[0].mode === 'sql' && loaded[0].schemaId) {
-            setSelectedSchemaId(loaded[0].schemaId)
-          }
-        } else {
-          setThreads([])
-          setActiveId(null)
-        }
+        setThreads(loaded)
+        const storedActiveId =
+          typeof window !== 'undefined'
+            ? window.localStorage.getItem(ACTIVE_THREAD_STORAGE_KEY)
+            : null
+        const hasStoredActive =
+          !!storedActiveId && loaded.some((thread) => thread.id === storedActiveId)
+        setActiveId(hasStoredActive ? storedActiveId : null)
+        const schemaFromLatestSqlThread = [...loaded]
+          .sort((a, b) => b.updatedAt - a.updatedAt)
+          .find((thread) => thread.mode === 'sql' && thread.schemaId)?.schemaId || null
+
+        const restoredSchemaId = schemaFromLatestSqlThread || loadedSchemas[0]?.id || null
+        setSelectedSchemaId(restoredSchemaId)
       } catch {
         if (cancelled) return
         router.replace('/login')
@@ -219,6 +252,15 @@ export default function ChatPage() {
     }
   }, [router, markBackendOffline])
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    if (activeId) {
+      window.localStorage.setItem(ACTIVE_THREAD_STORAGE_KEY, activeId)
+    } else {
+      window.localStorage.removeItem(ACTIVE_THREAD_STORAGE_KEY)
+    }
+  }, [activeId])
+
   // Persist changed threads to backend (only when backend is reachable)
   useEffect(() => {
     if (!hydrated || !backendOnline) return
@@ -233,6 +275,25 @@ export default function ChatPage() {
   }, [threads, hydrated, backendOnline, markBackendOffline])
 
   const active = threads.find(t => t.id === activeId) || null
+
+  useEffect(() => {
+    if (activeId) {
+      setTypedWelcome(WELCOME_TEXT)
+      return
+    }
+
+    setTypedWelcome('')
+    let i = 0
+    const timer = window.setInterval(() => {
+      i += 1
+      setTypedWelcome(WELCOME_TEXT.slice(0, i))
+      if (i >= WELCOME_TEXT.length) {
+        window.clearInterval(timer)
+      }
+    }, 65)
+
+    return () => window.clearInterval(timer)
+  }, [activeId])
 
   useEffect(() => {
     if (active?.mode === 'sql') {
@@ -310,7 +371,20 @@ export default function ChatPage() {
   }))
 
   const handleSendMessage = async (userMessage: string) => {
-    if (!active) return
+    if (!active) {
+      const starter = newThread('chat')
+      setThreads(prev => [starter, ...prev])
+      setActiveId(starter.id)
+      setError(null)
+      if (backendOnline) {
+        apiSaveThread(starter).catch(() => {
+          markBackendOffline()
+        })
+      }
+      await handleChatStream(userMessage, starter)
+      return
+    }
+
     if (active.mode === 'sql') {
       await handleTextToSql(userMessage)
     } else {
@@ -318,29 +392,36 @@ export default function ChatPage() {
     }
   }
 
-  const handleChatStream = async (userMessage: string) => {
-    if (!active) return
+  const handleChatStream = async (userMessage: string, threadOverride?: Thread) => {
+    const targetThread = threadOverride || active
+    if (!targetThread) return
     setError(null)
     setIsLoading(true)
 
-    const activeThreadId = active.id
+    const activeThreadId = targetThread.id
     const userMsg: Message = { id: uid(), role: 'user', content: userMessage }
     const assistantId = uid()
     const assistantMsg: Message = { id: assistantId, role: 'assistant', content: '' }
 
-    const historyForApi = active.messages
+    const historyForApi = targetThread.messages
       .filter(m => m.content)
       .map(m => ({ role: m.role, content: m.content }))
       .concat([{ role: 'user', content: userMessage }])
 
-    const isFirstUserMessage = !active.messages.some(m => m.role === 'user')
+    const isFirstUserMessage = !targetThread.messages.some(m => m.role === 'user')
 
-    updateActive(t => ({
-      ...t,
-      title: isFirstUserMessage ? deriveTitle(userMessage) : t.title,
-      messages: [...t.messages, userMsg, assistantMsg],
-      updatedAt: Date.now(),
-    }))
+    setThreads(prev =>
+      prev.map(t =>
+        t.id === activeThreadId
+          ? {
+              ...t,
+              title: isFirstUserMessage ? deriveTitle(userMessage) : t.title,
+              messages: [...t.messages, userMsg, assistantMsg],
+              updatedAt: Date.now(),
+            }
+          : t
+      )
+    )
 
     const patchAssistant = (content: string) => {
       setThreads(prev =>
@@ -588,11 +669,106 @@ export default function ChatPage() {
     }
   }
 
+  const handleSchemaEditorKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key !== 'Tab') return
+    e.preventDefault()
+
+    const target = e.currentTarget
+    const start = target.selectionStart
+    const end = target.selectionEnd
+    const nextValue = `${schemaText.slice(0, start)}  ${schemaText.slice(end)}`
+
+    setSchemaText(nextValue)
+    requestAnimationFrame(() => {
+      if (!schemaTextAreaRef.current) return
+      schemaTextAreaRef.current.selectionStart = start + 2
+      schemaTextAreaRef.current.selectionEnd = start + 2
+    })
+  }
+
+  const handleSchemaEditorScroll = (e: React.UIEvent<HTMLTextAreaElement>) => {
+    if (!schemaGutterRef.current) return
+    schemaGutterRef.current.scrollTop = e.currentTarget.scrollTop
+  }
+
+  const handleInsertSchemaTemplate = () => {
+    if (schemaText.trim()) return
+    setSchemaText(
+      'CREATE TABLE users (\n' +
+        '  id INT PRIMARY KEY,\n' +
+        '  username VARCHAR(100) NOT NULL,\n' +
+        '  email VARCHAR(255),\n' +
+        '  created_at TIMESTAMP\n' +
+        ');\n\n' +
+        'CREATE TABLE orders (\n' +
+        '  id INT PRIMARY KEY,\n' +
+        '  user_id INT NOT NULL,\n' +
+        '  total_amount DECIMAL(10,2),\n' +
+        '  created_at TIMESTAMP,\n' +
+        '  FOREIGN KEY (user_id) REFERENCES users(id)\n' +
+        ');'
+    )
+    requestAnimationFrame(() => schemaTextAreaRef.current?.focus())
+  }
+
   const handleLogout = async () => {
     try {
       await apiLogout()
     } finally {
       router.replace('/login')
+    }
+  }
+
+  const handleCloseActive = () => {
+    setActiveId(null)
+    setError(null)
+  }
+
+  const handleOpenProfileEditor = () => {
+    setProfileUsername(user?.username || '')
+    setProfileCurrentPassword('')
+    setProfileNewPassword('')
+    setProfileConfirmPassword('')
+    setProfileEditorOpen(true)
+    setError(null)
+  }
+
+  const handleSaveProfile = async () => {
+    const username = profileUsername.trim().toLowerCase()
+    const currentPassword = profileCurrentPassword
+    const newPassword = profileNewPassword
+
+    if (!currentPassword) {
+      setError('Enter your current password to save profile changes.')
+      return
+    }
+
+    if (newPassword && newPassword !== profileConfirmPassword) {
+      setError('New password and confirmation do not match.')
+      return
+    }
+
+    const usernameChanged = !!user && username !== user.username
+    const passwordChanged = newPassword.length > 0
+    if (!usernameChanged && !passwordChanged) {
+      setError('No profile changes were provided.')
+      return
+    }
+
+    setIsSavingProfile(true)
+    setError(null)
+    try {
+      const updated = await apiUpdateProfile({
+        currentPassword,
+        username,
+        newPassword: passwordChanged ? newPassword : undefined,
+      })
+      setUser(updated)
+      setProfileEditorOpen(false)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update profile')
+    } finally {
+      setIsSavingProfile(false)
     }
   }
 
@@ -621,6 +797,7 @@ export default function ChatPage() {
       <ChatSidebar
         threads={summaries}
         schemas={schemaSummaries}
+        username={user?.username}
         selectedSchemaId={selectedSchemaId}
         activeId={activeId}
         onSelect={(id) => {
@@ -633,113 +810,87 @@ export default function ChatPage() {
         onCreateSchema={handleCreateSchema}
         onEditSchema={handleEditSchema}
         onDeleteSchema={handleDeleteSchema}
+        onEditProfile={handleOpenProfileEditor}
         onLogout={handleLogout}
       />
 
       <div className="flex flex-1 flex-col min-w-0">
-        <div className="border-b border-border/70 bg-card/40 backdrop-blur">
-          <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-3 px-4 py-4 sm:px-6 lg:px-8">
-            <div className="flex min-w-0 items-center gap-3 pl-10 md:pl-0">
-              <span className="text-sm font-semibold tracking-wide">
-                {!active ? 'Choose a conversation type' : active.mode === 'sql' ? 'Text to SQL' : 'Chat'}
-              </span>
-              {active?.mode === 'sql' && !active.schemaId && (
-                <span className="rounded-full border border-amber-500/50 bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">
-                  Schema required
-                </span>
+        <div className="mx-auto flex w-full max-w-5xl flex-1 min-h-0 flex-col px-4 py-6 sm:px-6 lg:px-8">
+          {active && (
+            <div className="mb-4 flex items-center justify-end gap-2">
+              {active.mode === 'sql' && (
+                <>
+                  {!active.schemaId && (
+                    <span className="rounded-full border border-amber-500/50 bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">
+                      Schema required
+                    </span>
+                  )}
+                  <select
+                    value={active.schemaId || ''}
+                    onChange={(e) => {
+                      const nextSchemaId = e.target.value
+                      if (nextSchemaId === '__create__') {
+                        handleCreateSchema()
+                        return
+                      }
+                      if (nextSchemaId) {
+                        handleSelectSchema(nextSchemaId)
+                      }
+                    }}
+                    className="rounded-full border border-border bg-background/50 px-3 py-1.5 pr-8 text-xs font-medium text-foreground outline-none transition-all hover:border-primary focus:border-primary"
+                  >
+                    <option value="">Select schema...</option>
+                    {schemaSummaries.map((schema) => (
+                      <option key={schema.id} value={schema.id}>
+                        {schema.title}
+                      </option>
+                    ))}
+                    <option value="__create__">+ Add new schema</option>
+                  </select>
+                </>
               )}
-              {user && (
-                <span className="text-xs text-muted-foreground">@{user.username}</span>
-              )}
-              {active && (
-                <span className="line-clamp-1 text-xs text-muted-foreground">
-                  {active.title}
-                </span>
-              )}
-            </div>
-          
-            {active?.mode === 'sql' && (
               <button
                 type="button"
-                onClick={() => {
-                  if (active.schemaId) {
-                    handleEditSchema(active.schemaId)
-                  } else {
-                    handleCreateSchema()
-                  }
-                }}
-                className="inline-flex shrink-0 items-center gap-2 rounded-full border border-border bg-background/50 px-3 py-1.5 text-xs font-medium text-foreground transition-all hover:border-primary"
+                onClick={handleCloseActive}
+                className="inline-flex items-center gap-1 rounded-full border border-border bg-background/50 px-3 py-1.5 text-xs font-medium text-foreground transition-all hover:border-primary"
               >
-                {active.schemaId ? 'Edit Selected Schema' : 'Add Schema'}
+                Close
               </button>
-            )}
-          </div>
-        </div>
-
-        <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col min-h-0 px-4 py-6 sm:px-6 lg:px-8">
-          {active?.mode === 'sql' && schemaEditorOpen && (
-            <div className="mb-4 rounded-2xl border border-border bg-card/60 p-4">
-              <p className="mb-2 text-sm font-medium">SQL Schema</p>
-              <p className="mb-3 text-xs text-muted-foreground">
-                Schemas are stored per account. Add a title and paste CREATE TABLE statements.
-              </p>
-              <input
-                value={schemaTitle}
-                onChange={(e) => setSchemaTitle(e.target.value)}
-                className="mb-3 w-full rounded-xl border border-border bg-background/60 px-3 py-2 text-sm outline-none focus:border-primary"
-                placeholder="Schema title (e.g., Brokerage DB)"
-              />
-              <textarea
-                value={schemaText}
-                onChange={(e) => setSchemaText(e.target.value)}
-                className="matrix-scrollbar min-h-40 w-full resize-y rounded-xl border border-border bg-background/60 px-3 py-2 text-xs font-mono outline-none focus:border-primary"
-                placeholder="CREATE TABLE Users (...);"
-              />
-              <div className="mt-3 flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleSaveSchema}
-                  disabled={isSavingSchema}
-                  className="rounded-xl border border-primary bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-70"
-                >
-                  {isSavingSchema ? 'Saving...' : editingSchemaId ? 'Update Schema' : 'Create Schema'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSchemaEditorOpen(false)}
-                  className="rounded-xl border border-border bg-background/40 px-3 py-1.5 text-xs text-muted-foreground"
-                >
-                  Close
-                </button>
-              </div>
             </div>
           )}
 
-          <div className="matrix-scrollbar flex-1 min-h-0 overflow-y-auto space-y-4 rounded-3xl border border-border bg-card/35 p-4 shadow-[0_20px_60px_-30px_rgba(0,0,0,0.65)] sm:p-6">
-            {!active ? (
-              <div className="flex h-full min-h-56 flex-col items-center justify-center gap-4 rounded-2xl border border-dashed border-border/80 bg-background/20 p-6 text-center">
-                <p className="text-sm text-muted-foreground">
-                  Start by choosing what you want to create.
-                </p>
-                <div className="flex flex-wrap items-center justify-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => handleNewChat('chat')}
-                    className="rounded-xl border border-primary bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary"
-                  >
-                    New Chat
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleNewChat('sql')}
-                    className="rounded-xl border border-border bg-background/60 px-3 py-1.5 text-xs font-medium text-foreground hover:border-primary"
-                  >
-                    New Text to SQL
-                  </button>
-                </div>
+          {!active ? (
+            <div className="flex flex-1 min-h-0 flex-col items-center justify-center p-6 text-center">
+              <p className="font-mono text-4xl font-bold uppercase tracking-[0.12em] text-primary drop-shadow-[0_0_10px_rgba(34,197,94,0.35)] sm:text-4xl md:text-5xl">
+                {typedWelcome}
+                <span
+                  className={`ml-1 inline-block text-primary/80 ${
+                    typedWelcome.length >= WELCOME_TEXT.length ? 'animate-pulse' : ''
+                  }`}
+                >
+                  |
+                </span>
+              </p>
+              <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => handleNewChat('sql')}
+                  className="rounded-xl border border-primary bg-primary/10 px-4 py-2 text-sm font-medium text-primary transition-all hover:bg-primary/20"
+                >
+                  Add New Text to SQL
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleNewChat('chat')}
+                                    className="rounded-xl border border-border bg-background/60 px-4 py-2 text-sm font-medium text-foreground transition-all hover:border-primary hover:bg-background/80"
+                >
+                  Add New Chat
+                </button>
               </div>
-            ) : (
-              active.messages.map((message) => (
+            </div>
+          ) : (
+            <div className="matrix-scrollbar flex-1 min-h-0 overflow-y-auto space-y-4 rounded-3xl border border-border bg-card/35 p-4 shadow-[0_20px_60px_-30px_rgba(0,0,0,0.65)] sm:p-6">
+              {active.messages.map((message) => (
                 <ChatMessage
                   key={message.id}
                   role={message.role}
@@ -751,10 +902,10 @@ export default function ChatPage() {
                     !message.content
                   }
                 />
-              ))
-            )}
-            <div ref={messagesEndRef} />
-          </div>
+              ))}
+              <div ref={messagesEndRef} />
+            </div>
+          )}
 
           {error && (
             <div className="mt-4 rounded-2xl border border-destructive/50 bg-destructive/10 p-4 text-sm text-destructive">
@@ -762,22 +913,207 @@ export default function ChatPage() {
             </div>
           )}
 
-          <div className="pt-4">
-            <ChatInput
-              onSubmit={handleSendMessage}
-              isLoading={isLoading}
-              disabled={!active}
-              placeholder={
-                active?.mode === 'sql'
-                  ? 'Describe the query you want...'
-                  : active
-                    ? 'Type your message...'
-                    : 'Choose a conversation type to begin...'
-              }
-            />
-          </div>
+          {active && (
+            <div className="pt-4">
+              <ChatInput
+                onSubmit={handleSendMessage}
+                isLoading={isLoading}
+                disabled={isLoading}
+                placeholder={
+                  active.mode === 'sql'
+                    ? 'Describe the query you want...'
+                    : 'Type your message...'
+                }
+              />
+            </div>
+          )}
         </div>
       </div>
+
+      {schemaEditorOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <button
+            type="button"
+            aria-label="Close schema editor"
+            onClick={() => setSchemaEditorOpen(false)}
+            className="absolute inset-0 bg-black/60"
+          />
+          <div className="relative z-10 flex h-[78vh] min-h-[460px] w-[92vw] min-w-[320px] max-w-4xl max-h-[90vh] resize flex-col overflow-hidden rounded-2xl border border-border bg-card p-4 shadow-2xl sm:p-5">
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-medium">
+                  {editingSchemaId ? 'Edit SQL Schema' : 'Add SQL Schema'}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Schemas are stored per account. Add a title and paste CREATE TABLE statements.
+                </p>
+                <p className="mt-1 text-[11px] text-muted-foreground/80">
+                  Tip: drag the bottom-right corner to resize this editor.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSchemaEditorOpen(false)}
+                className="rounded-md border border-border bg-background/40 px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+              >
+                Close
+              </button>
+            </div>
+
+            <input
+              value={schemaTitle}
+              onChange={(e) => setSchemaTitle(e.target.value)}
+              className="mb-3 w-full rounded-xl border border-border bg-background/60 px-3 py-2 text-sm outline-none focus:border-primary"
+              placeholder="Schema title (e.g., Brokerage DB)"
+            />
+
+            <div className="flex-1 overflow-hidden rounded-xl border border-border bg-background/80">
+              <div className="flex items-center justify-between border-b border-border/70 bg-background/60 px-3 py-1.5">
+                <span className="text-[11px] font-medium text-muted-foreground">SQL Editor</span>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={handleInsertSchemaTemplate}
+                    className="rounded-md border border-border bg-background/40 px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+                  >
+                    Insert Template
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSchemaText('')}
+                    className="rounded-md border border-border bg-background/40 px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+              <div className="flex h-full min-h-56">
+                <div
+                  ref={schemaGutterRef}
+                  className="w-10 shrink-0 select-none overflow-hidden border-r border-border/70 bg-background/60 px-2 py-2 text-right text-[11px] leading-5 text-muted-foreground"
+                >
+                  {Array.from({ length: Math.max(1, schemaText.split('\n').length) }).map((_, idx) => (
+                    <div key={idx}>{idx + 1}</div>
+                  ))}
+                </div>
+                <textarea
+                  ref={schemaTextAreaRef}
+                  value={schemaText}
+                  onChange={(e) => setSchemaText(e.target.value)}
+                  onKeyDown={handleSchemaEditorKeyDown}
+                  onScroll={handleSchemaEditorScroll}
+                  className="matrix-scrollbar h-full w-full resize-none bg-background/40 px-3 py-2 text-xs leading-5 font-mono outline-none"
+                  placeholder="CREATE TABLE Users (\n  id INT PRIMARY KEY,\n  username VARCHAR(100) NOT NULL\n);"
+                  spellCheck={false}
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  autoComplete="off"
+                  wrap="off"
+                />
+              </div>
+            </div>
+
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleSaveSchema}
+                disabled={isSavingSchema}
+                className="rounded-xl border border-primary bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {isSavingSchema ? 'Saving...' : editingSchemaId ? 'Update Schema' : 'Create Schema'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSchemaEditorOpen(false)}
+                className="rounded-xl border border-border bg-background/40 px-3 py-1.5 text-xs text-muted-foreground"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {profileEditorOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <button
+            type="button"
+            aria-label="Close profile editor"
+            onClick={() => setProfileEditorOpen(false)}
+            className="absolute inset-0 bg-black/60"
+          />
+          <div className="relative z-10 w-full max-w-md rounded-2xl border border-border bg-card p-4 shadow-2xl sm:p-5">
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-medium">Edit Profile</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Change your username or password.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setProfileEditorOpen(false)}
+                className="rounded-md border border-border bg-background/40 px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+              >
+                Close
+              </button>
+            </div>
+
+            <label className="mb-1 block text-xs text-muted-foreground">Username</label>
+            <input
+              value={profileUsername}
+              onChange={(e) => setProfileUsername(e.target.value)}
+              className="mb-3 w-full rounded-xl border border-border bg-background/60 px-3 py-2 text-sm outline-none focus:border-primary"
+              placeholder="Username"
+            />
+
+            <label className="mb-1 block text-xs text-muted-foreground">Current password</label>
+            <input
+              type="password"
+              value={profileCurrentPassword}
+              onChange={(e) => setProfileCurrentPassword(e.target.value)}
+              className="mb-3 w-full rounded-xl border border-border bg-background/60 px-3 py-2 text-sm outline-none focus:border-primary"
+              placeholder="Required to save changes"
+            />
+
+            <label className="mb-1 block text-xs text-muted-foreground">New password (optional)</label>
+            <input
+              type="password"
+              value={profileNewPassword}
+              onChange={(e) => setProfileNewPassword(e.target.value)}
+              className="mb-3 w-full rounded-xl border border-border bg-background/60 px-3 py-2 text-sm outline-none focus:border-primary"
+              placeholder="Leave empty to keep current password"
+            />
+
+            <label className="mb-1 block text-xs text-muted-foreground">Confirm new password</label>
+            <input
+              type="password"
+              value={profileConfirmPassword}
+              onChange={(e) => setProfileConfirmPassword(e.target.value)}
+              className="w-full rounded-xl border border-border bg-background/60 px-3 py-2 text-sm outline-none focus:border-primary"
+              placeholder="Repeat new password"
+            />
+
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleSaveProfile}
+                disabled={isSavingProfile}
+                className="rounded-xl border border-primary bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {isSavingProfile ? 'Saving...' : 'Save Profile'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setProfileEditorOpen(false)}
+                className="rounded-xl border border-border bg-background/40 px-3 py-1.5 text-xs text-muted-foreground"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   )
 }

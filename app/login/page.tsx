@@ -62,9 +62,8 @@ export default function LoginPage() {
           className="mx-auto mb-4 h-16 w-16 rounded-2xl shadow-lg shadow-matrix-green/30"
           draggable="false"
         />
-        <p className="text-sm uppercase tracking-[0.2em] text-matrix-green/80">MatrixChat</p>
-        <h1 className="mt-4 text-4xl font-extrabold text-matrix-green drop-shadow-lg">Sign In</h1>
-        <p className="mt-2 text-lg text-matrix-green/70">Access your personal threads and messages.</p>
+        <p className="text-center text-sm uppercase tracking-[0.2em] text-matrix-green/80">WELCOME TO CONSTRUCT</p>
+        <h1 className="mt-4 text-center text-4xl font-extrabold text-matrix-green drop-shadow-lg">Sign In</h1>
 
         <form className="mt-6 space-y-4" onSubmit={onSubmit}>
           <label className="block">
@@ -107,7 +106,7 @@ export default function LoginPage() {
           </button>
         </form>
 
-        <p className="mt-5 text-sm text-muted-foreground">
+        <p className="text-center mt-5 text-sm text-muted-foreground">
           No account?{' '}
           <Link href="/register" className="text-primary underline-offset-4 hover:underline">
             Create one

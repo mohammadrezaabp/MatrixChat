@@ -197,6 +197,12 @@ class LoginRequest(BaseModel):
     username: str
     password: str
 
+
+class UpdateProfileRequest(BaseModel):
+    currentPassword: str
+    username: Optional[str] = None
+    newPassword: Optional[str] = None
+
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -438,6 +444,41 @@ def logout(response: Response):
 
 @app.get("/auth/me", response_model=AuthUserSchema)
 def me(current_user: UserModel = Depends(get_current_user)):
+    return AuthUserSchema(id=current_user.id, username=current_user.username)
+
+
+@app.put("/auth/profile", response_model=AuthUserSchema)
+def update_profile(
+    body: UpdateProfileRequest,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user),
+):
+    if not verify_password(body.currentPassword, current_user.password_hash):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+
+    next_username = body.username.strip().lower() if body.username is not None else current_user.username
+    next_password = body.newPassword if body.newPassword is not None else None
+
+    wants_username_change = next_username != current_user.username
+    wants_password_change = bool(next_password)
+    if not wants_username_change and not wants_password_change:
+        raise HTTPException(status_code=400, detail="No profile changes were provided")
+
+    if wants_username_change:
+        if len(next_username) < 3:
+            raise HTTPException(status_code=400, detail="Username must be at least 3 characters")
+        existing = db.query(UserModel).filter(UserModel.username == next_username).first()
+        if existing and existing.id != current_user.id:
+            raise HTTPException(status_code=409, detail="Username already exists")
+        current_user.username = next_username
+
+    if wants_password_change:
+        if len(next_password) < 6:
+            raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+        current_user.password_hash = hash_password(next_password)
+
+    db.commit()
+    db.refresh(current_user)
     return AuthUserSchema(id=current_user.id, username=current_user.username)
 
 
