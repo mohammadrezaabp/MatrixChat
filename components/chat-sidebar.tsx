@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 export type Mode = 'chat' | 'sql'
 
@@ -87,6 +87,28 @@ export function ChatSidebar({
   const chatCount = chatThreads.length
   const sqlCount = sqlThreads.length
   const schemaCount = sortedSchemas.length
+  const selectedInExtraChat = !!activeId && extraChatThreads.some((t) => t.id === activeId)
+  const selectedInExtraSql = !!activeId && extraSqlThreads.some((t) => t.id === activeId)
+
+  useEffect(() => {
+    if (!activeId) return
+
+    const activeThread = sorted.find((t) => t.id === activeId)
+    if (!activeThread) return
+
+    if (activeThread.mode === 'chat') {
+      setChatOpen(true)
+      if (selectedInExtraChat) {
+        setChatExpanded(true)
+      }
+      return
+    }
+
+    setSqlOpen(true)
+    if (selectedInExtraSql) {
+      setSqlExpanded(true)
+    }
+  }, [activeId, sorted, selectedInExtraChat, selectedInExtraSql])
 
   const renderItem = (t: ThreadSummary) => (
     <li key={t.id}>

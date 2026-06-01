@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 
 interface ChatMessageProps {
   role: 'user' | 'assistant'
@@ -15,6 +15,17 @@ export function ChatMessage({ role, content, isLoading, isSql }: ChatMessageProp
   const logo = '/icon.svg'
   const userIcon = '/matrix-user.svg'
 
+  const sqlLines = useMemo(() => {
+    const normalized = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    // Some responses may contain literal escape sequences (e.g. "\\n") instead of real newlines.
+    // Decode that shape only when the text is effectively single-line to preserve normal SQL strings.
+    const decoded =
+      !normalized.includes('\n') && /\\r\\n|\\n|\\r/.test(normalized)
+        ? normalized.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\r/g, '\n')
+        : normalized
+    return decoded.split('\n')
+  }, [content])
+
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(content)
@@ -24,7 +35,7 @@ export function ChatMessage({ role, content, isLoading, isSql }: ChatMessageProp
       console.error('Copy failed', error)
     }
   }
-  
+
   return (
     <div className={`mb-4 flex animate-fadeIn ${isUser ? 'flex-row-reverse justify-start gap-1' : 'justify-start gap-1'}`} dir="ltr">
       {/* Avatar/Marker */}
@@ -42,12 +53,18 @@ export function ChatMessage({ role, content, isLoading, isSql }: ChatMessageProp
       </div>
       
       {/* Message Content */}
-      <div className={`flex-1 max-w-[85%] flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
-        <div className={`relative w-fit max-w-xs rounded-2xl border px-4 py-3 md:max-w-md lg:max-w-lg ${
-          isUser
-            ? 'border-primary/40 bg-primary/5 text-foreground'
-            : 'border-border bg-card/80 text-foreground'
-        }`}>
+      <div className={`flex-1 ${isSql && !isUser ? 'max-w-[96%]' : 'max-w-[85%]'} flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
+        <div
+          className={
+            isSql && !isUser
+              ? 'relative w-full max-w-3xl p-0'
+              : `relative w-fit max-w-xs rounded-2xl border px-4 py-3 text-foreground md:max-w-md lg:max-w-lg ${
+                  isUser
+                    ? 'border-primary/40 bg-primary/5'
+                    : 'border-border bg-card/80'
+                }`
+          }
+        >
           {isLoading ? (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <span className="inline-flex gap-1">
@@ -59,9 +76,20 @@ export function ChatMessage({ role, content, isLoading, isSql }: ChatMessageProp
             </div>
           ) : isSql ? (
             <div className="w-full">
-              <pre dir="ltr" className="min-h-[120px] overflow-x-auto whitespace-pre-wrap break-words border-t border-t-transparent px-3 pb-3 pt-6 text-sm font-mono text-foreground">
-                {content}
-              </pre>
+              <div className="resize overflow-auto rounded-xl border border-border/70 bg-background/70" style={{ minWidth: '280px', minHeight: '160px' }}>
+                <ol className="matrix-scrollbar min-h-[160px] w-full list-none p-0 text-xs leading-5 font-mono text-foreground">
+                  {sqlLines.map((line, idx) => (
+                    <li key={idx} className="grid grid-cols-[2.75rem_minmax(0,1fr)]">
+                      <div className="select-none border-r border-border/70 bg-background/80 px-2 py-2 text-right text-[11px] text-muted-foreground">
+                        {idx + 1}
+                      </div>
+                      <pre dir="ltr" className="m-0 px-3 py-2 whitespace-pre-wrap break-words">
+                        {line || ' '}
+                      </pre>
+                    </li>
+                  ))}
+                </ol>
+              </div>
             </div>
           ) : (
             <p className="whitespace-pre-wrap break-words text-left text-sm md:text-base">

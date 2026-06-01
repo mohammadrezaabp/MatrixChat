@@ -189,6 +189,7 @@ export default function ChatPage() {
   const [profileCurrentPassword, setProfileCurrentPassword] = useState('')
   const [profileNewPassword, setProfileNewPassword] = useState('')
   const [profileConfirmPassword, setProfileConfirmPassword] = useState('')
+  const [sqlSchemaMenuOpen, setSqlSchemaMenuOpen] = useState(false)
   const [isSavingProfile, setIsSavingProfile] = useState(false)
   const [hydrated, setHydrated] = useState(false)
   const [backendOnline, setBackendOnline] = useState(false)
@@ -196,6 +197,7 @@ export default function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const schemaTextAreaRef = useRef<HTMLTextAreaElement>(null)
   const schemaGutterRef = useRef<HTMLDivElement>(null)
+  const hasHydratedRef = useRef(false)
   // Track which thread id was last saved so we only PUT when something changed.
   const lastSaved = useRef<Record<string, number>>({})
 
@@ -207,6 +209,10 @@ export default function ChatPage() {
   // Validate auth and load threads on mount.
   useEffect(() => {
     let cancelled = false
+    const storedActiveId =
+      typeof window !== 'undefined'
+        ? window.localStorage.getItem(ACTIVE_THREAD_STORAGE_KEY)
+        : null
 
     const init = async () => {
       try {
@@ -224,10 +230,6 @@ export default function ChatPage() {
 
         setBackendOnline(true)
         setThreads(loaded)
-        const storedActiveId =
-          typeof window !== 'undefined'
-            ? window.localStorage.getItem(ACTIVE_THREAD_STORAGE_KEY)
-            : null
         const hasStoredActive =
           !!storedActiveId && loaded.some((thread) => thread.id === storedActiveId)
         setActiveId(hasStoredActive ? storedActiveId : null)
@@ -253,6 +255,13 @@ export default function ChatPage() {
   }, [router, markBackendOffline])
 
   useEffect(() => {
+    if (hydrated) {
+      hasHydratedRef.current = true
+    }
+  }, [hydrated])
+
+  useEffect(() => {
+    if (!hasHydratedRef.current) return
     if (typeof window === 'undefined') return
     if (activeId) {
       window.localStorage.setItem(ACTIVE_THREAD_STORAGE_KEY, activeId)
@@ -369,6 +378,7 @@ export default function ChatPage() {
     title: s.title,
     updatedAt: s.updatedAt,
   }))
+  const selectedSchemaTitle = schemaSummaries.find((schema) => schema.id === selectedSchemaId)?.title || null
 
   const handleSendMessage = async (userMessage: string) => {
     if (!active) {
@@ -579,20 +589,20 @@ export default function ChatPage() {
     }
   }
 
-  const handleSelectSchema = (schemaId: string) => {
+  const handleSelectDefaultSchema = (schemaId: string) => {
+    setSelectedSchemaId(schemaId)
+    setSchemaEditorOpen(false)
+    setError(null)
+  }
+
+  const handleSelectSchemaForActiveThread = (schemaId: string) => {
     setSelectedSchemaId(schemaId)
     setSchemaEditorOpen(false)
     setError(null)
 
     if (active && active.mode === 'sql') {
       updateActive(t => ({ ...t, schemaId, updatedAt: Date.now() }))
-      return
     }
-
-    const t = newThread('sql')
-    t.schemaId = schemaId
-    setThreads(prev => [t, ...prev])
-    setActiveId(t.id)
   }
 
   const handleCreateSchema = () => {
@@ -806,7 +816,7 @@ export default function ChatPage() {
         }}
         onNewChat={handleNewChat}
         onDelete={handleDelete}
-        onSelectSchema={handleSelectSchema}
+        onSelectSchema={handleSelectDefaultSchema}
         onCreateSchema={handleCreateSchema}
         onEditSchema={handleEditSchema}
         onDeleteSchema={handleDeleteSchema}
@@ -825,28 +835,61 @@ export default function ChatPage() {
                       Schema required
                     </span>
                   )}
-                  <select
-                    value={active.schemaId || ''}
-                    onChange={(e) => {
-                      const nextSchemaId = e.target.value
-                      if (nextSchemaId === '__create__') {
-                        handleCreateSchema()
-                        return
-                      }
-                      if (nextSchemaId) {
-                        handleSelectSchema(nextSchemaId)
-                      }
-                    }}
-                    className="rounded-full border border-border bg-background/50 px-3 py-1.5 pr-8 text-xs font-medium text-foreground outline-none transition-all hover:border-primary focus:border-primary"
-                  >
-                    <option value="">Select schema...</option>
-                    {schemaSummaries.map((schema) => (
-                      <option key={schema.id} value={schema.id}>
-                        {schema.title}
-                      </option>
-                    ))}
-                    <option value="__create__">+ Add new schema</option>
-                  </select>
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setSqlSchemaMenuOpen(v => !v)}
+                      className="inline-flex items-center gap-2 rounded-full border border-border bg-background/50 px-3 py-1.5 text-xs font-medium text-foreground transition-all hover:border-primary"
+                    >
+                      <span className="max-w-48 truncate">{active.schemaId ? (schemaSummaries.find((schema) => schema.id === active.schemaId)?.title || 'Select schema...') : (selectedSchemaTitle || 'Select schema...')}</span>
+                      <svg
+                        width="12"
+                        height="12"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        aria-hidden
+                        className={`transition-transform ${sqlSchemaMenuOpen ? 'rotate-180' : ''}`}
+                      >
+                        <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </button>
+                    {sqlSchemaMenuOpen && (
+                      <div className="absolute right-0 top-full z-20 mt-1 min-w-56 overflow-hidden rounded-xl border border-border bg-card shadow-lg">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            handleCreateSchema()
+                            setSqlSchemaMenuOpen(false)
+                          }}
+                          className="block w-full px-3 py-2 text-left text-xs font-medium text-foreground hover:bg-background/60"
+                        >
+                          + Add new schema
+                        </button>
+                        <div className="max-h-60 overflow-y-auto">
+                          {schemaSummaries.length === 0 ? (
+                            <p className="px-3 py-2 text-xs text-muted-foreground">No schemas yet.</p>
+                          ) : (
+                            schemaSummaries.map((schema) => {
+                              const isActiveSchema = active.schemaId === schema.id
+                              return (
+                                <button
+                                  key={schema.id}
+                                  type="button"
+                                  onClick={() => {
+                                    handleSelectSchemaForActiveThread(schema.id)
+                                    setSqlSchemaMenuOpen(false)
+                                  }}
+                                  className={`block w-full px-3 py-2 text-left text-xs transition-colors hover:bg-background/60 ${isActiveSchema ? 'bg-primary/10 text-foreground' : 'text-muted-foreground'}`}
+                                >
+                                  {schema.title}
+                                </button>
+                              )
+                            })
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </>
               )}
               <button
