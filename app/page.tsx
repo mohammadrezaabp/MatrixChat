@@ -581,7 +581,7 @@ export default function ChatPage() {
         err instanceof Error ? err.message : 'SQL generation failed.'
       setError(errorMessage)
       patchAssistant({
-        content: `[Error]\n${errorMessage}\n\nPlease check that the Python service is running and a valid schema is selected.`,
+        content: `[Error]\n${errorMessage}\n\n`,
         isSql: false,
       })
     } finally {
