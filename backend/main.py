@@ -144,7 +144,7 @@ CHAT_SYSTEM_PROMPT = (
 
 SQL_SYSTEM_PROMPT = (
     "You are a senior database engineer. Convert the user request into ONE valid "
-    "SQL SELECT/INSERT/UPDATE/DELETE statement that runs against the given schema. "
+    "SQL SELECT statement that runs against the given schema. "
     "Output ONLY the SQL, terminated with a single semicolon. No prose, no markdown, "
     "no comments, no explanations, no code fences."
 )
@@ -160,22 +160,72 @@ _REFINE_KEYWORDS = {
 
 SQL_RULES = (
     "Rules:\n"
-    "1. Use ONLY tables and columns that appear in the SCHEMA. Never invent names.\n"
-    "2. Match the exact casing of table and column names from the SCHEMA.\n"
-    "3. Prefer explicit JOIN ... ON syntax over comma joins. Qualify columns with table "
-    "aliases when joining.\n"
-    "4. Use clear short aliases (c for Customers, a for BankAccounts, s for Symbols, etc.).\n"
-    "5. Add WHERE / GROUP BY / ORDER BY / LIMIT only when the request asks for them.\n"
-    "6. Use the SQL dialect that matches the SCHEMA syntax. If the schema uses IDENTITY, "
-    "GETDATE(), BIT, NVARCHAR (T-SQL / SQL Server) then use TOP N and DATEADD/GETDATE for dates. "
-    "If the schema looks like MySQL then use LIMIT N and CURDATE() / INTERVAL.\n"
-    "7. For aggregate questions use COUNT/SUM/AVG/MIN/MAX with GROUP BY as needed.\n"
-    "8. Use single quotes for string and date literals. Dates as 'YYYY-MM-DD'.\n"
-    "9. When refining a prior query, KEEP its existing SELECT columns, filters, joins, "
-    "ordering and limits unless the new request explicitly changes them. Only add or "
-    "adjust what was asked. To add a column from another table, ADD a JOIN and ADD the "
-    "column to the SELECT list \u2014 do NOT replace the original query.\n"
-    "10. Return exactly one statement ending with ';'. No trailing text."
+
+    # --- Schema fidelity ---
+    "1. Use ONLY tables and columns that appear in the SCHEMA. Never invent, guess, or "
+    "hallucinate names. If a requested column or table does not exist in the SCHEMA, "
+    "say so instead of writing a query.\n"
+
+    "2. Match the exact casing of every table and column name from the SCHEMA.\n"
+
+    # --- Dialect detection ---
+    "3. Detect the SQL dialect from SCHEMA clues before writing anything:\n"
+    "   - T-SQL / SQL Server: IDENTITY, GETDATE(), BIT, NVARCHAR, TOP N, DATEADD, DATEDIFF.\n"
+    "   - MySQL / MariaDB: AUTO_INCREMENT, CURDATE(), LIMIT N, DATE_ADD, DATEDIFF.\n"
+    "   - PostgreSQL: SERIAL/BIGSERIAL, NOW(), LIMIT N, INTERVAL, ILIKE.\n"
+    "   - SQLite: INTEGER PRIMARY KEY, date('now'), LIMIT N.\n"
+    "   Never mix syntax across dialects.\n"
+
+    # --- Join & alias discipline ---
+    "4. Always use explicit JOIN ... ON syntax. Never use comma joins or implicit cross joins.\n"
+
+    "5. Qualify every column with its table alias when more than one table is referenced. "
+    "Use short, consistent aliases (c=Customers, a=BankAccounts, s=Symbols, o=Orders, "
+    "t=Transactions, u=Users, p=Products). Keep aliases stable across query refinements.\n"
+
+    # --- SELECT discipline ---
+    "6. Never use SELECT *. List only the columns the request actually needs. "
+    "This reduces network overhead and prevents breakage if the schema changes.\n"
+
+    # --- Performance rules ---
+    "7. Prefer JOIN over correlated subqueries in the WHERE clause. "
+    "Use EXISTS instead of IN when checking membership in a large set.\n"
+
+    "8. Do not apply functions to indexed columns on the left side of a WHERE predicate "
+    "(e.g., avoid WHERE YEAR(created_at) = 2024; use a range instead: "
+    "WHERE created_at >= '2024-01-01' AND created_at < '2025-01-01').\n"
+
+    "9. For large aggregations, filter with WHERE before GROUP BY to reduce the working set. "
+    "Avoid HAVING unless filtering on an aggregate value.\n"
+
+    "10. Use CTEs (WITH ...) instead of deeply nested subqueries to keep plans readable "
+    "and allow the optimizer to materialize intermediate results.\n"
+
+    # --- Clauses & literals ---
+    "11. Add WHERE / GROUP BY / ORDER BY / LIMIT (or TOP N) only when the request asks for them.\n"
+
+    "12. Use single quotes for all string and date literals. Format dates as 'YYYY-MM-DD'. "
+    "Never use double quotes for literals.\n"
+
+    "13. For aggregate questions use COUNT / SUM / AVG / MIN / MAX with GROUP BY as needed. "
+    "Always include the non-aggregated SELECT columns in the GROUP BY clause.\n"
+
+    # --- NULL & type safety ---
+    "14. Use IS NULL / IS NOT NULL, never = NULL or != NULL.\n"
+
+    "15. Do not implicitly cast types. If comparing columns of different types, apply an "
+    "explicit CAST or CONVERT. Implicit casts suppress index usage.\n"
+
+    # --- Refinement continuity ---
+    "16. When refining a prior query, preserve all existing SELECT columns, JOINs, filters, "
+    "ORDER BY, and LIMIT/TOP unless the new request explicitly changes them. "
+    "To add a column from a new table: ADD a JOIN and ADD the column to SELECT. "
+    "Do NOT replace or rewrite the original query from scratch.\n"
+
+    # --- Output format ---
+    "17. Return exactly one SQL statement ending with ';'. "
+    "No explanations, no markdown fences, no trailing text unless the query cannot be "
+    "written safely — in that case explain why instead of guessing.\n"
 )
 
 AUTH_SECRET = os.getenv("AUTH_SECRET", "matrixchat-dev-secret-change-me")
