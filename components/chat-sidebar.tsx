@@ -10,6 +10,7 @@ export interface ThreadSummary {
   title: string
   mode: Mode
   schemaId?: string | null
+  sqlModel?: string | null
   updatedAt: number
 }
 
@@ -44,6 +45,13 @@ function formatRelative(ts: number) {
   const d = Math.floor(h / 24)
   if (d < 7) return `${d}d ago`
   return new Date(ts).toLocaleDateString()
+}
+
+function formatSqlModel(model: string | null | undefined) {
+  if (!model) return 'DeepSeek-V4-Pro'
+  if (model === 'ollama') return 'qwen2.5-coder:7b-instruct-q4_K_M'
+  if (model === 'deepseek') return 'DeepSeek-V4-Pro'
+  return model
 }
 
 export function ChatSidebar({
@@ -111,7 +119,7 @@ export function ChatSidebar({
   const renderItem = (t: ThreadSummary) => (
     <li key={t.id}>
       <div
-        className={`group relative flex items-center gap-2 rounded-xl border px-3 py-2 text-sm transition-all ${
+        className={`group relative flex items-center gap-2 rounded-xl border px-3.5 py-2.5 text-sm transition-all ${
           activeId === t.id
             ? 'border-primary/80 bg-primary/10 text-foreground shadow-sm shadow-primary/20'
             : 'border-border/60 bg-background/50 text-foreground hover:border-border hover:bg-card/80'
@@ -123,15 +131,20 @@ export function ChatSidebar({
             onSelect(t.id)
             setOpen(false)
           }}
-          className="flex flex-1 flex-col items-start text-left"
+          className="flex flex-1 flex-col items-start gap-1 text-left"
         >
-          <span className="line-clamp-1 w-full">{t.title}</span>
-          <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+          <span className="line-clamp-1 w-full text-sm font-medium">{t.title}</span>
+          <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
             {t.mode === 'sql' ? 'SQL' : 'Chat'} · {formatRelative(t.updatedAt)}
           </span>
           {t.mode === 'sql' && (
-            <span className="text-[10px] uppercase tracking-wider text-muted-foreground/80">
+            <span className="inline-flex max-w-full items-center rounded-md border border-border/70 bg-background/60 px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground/90">
               Schema: {t.schemaId ? (schemaTitleById.get(t.schemaId) || 'Unknown') : 'Unknown'}
+            </span>
+          )}
+          {t.mode === 'sql' && (
+            <span className="inline-flex max-w-full items-center rounded-md border border-border/70 bg-background/60 px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground/90">
+              Model: {formatSqlModel(t.sqlModel)}
             </span>
           )}
         </button>
@@ -238,7 +251,7 @@ export function ChatSidebar({
         )}
       </div>
 
-      <div className="matrix-scrollbar mt-4 flex-1 min-h-0 overflow-y-auto pr-1">
+      <div className="matrix-scrollbar mt-4 flex-1 min-h-0 overflow-y-auto pr-1.5">
         <div className="space-y-4">
           {sorted.length === 0 && (
             <p className="px-2 py-2 text-center text-xs text-muted-foreground">
@@ -434,7 +447,7 @@ export function ChatSidebar({
       </button>
 
       {/* Desktop sidebar */}
-      <aside className="hidden h-dvh w-72 shrink-0 flex-col border-r border-border/70 bg-card/40 p-4 backdrop-blur md:flex">
+      <aside className="hidden h-dvh w-80 shrink-0 flex-col border-r border-border/70 bg-card/40 p-4 backdrop-blur md:flex">
         <div className="mb-4 flex items-center justify-center gap-2 px-1 text-center">
           <span className="text-lg font-semibold tracking-wide text-foreground">Construct</span>
           <span className="rounded-full border border-border bg-background/70 px-2 py-0.5 text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
@@ -487,7 +500,7 @@ export function ChatSidebar({
       {open && (
         <div className="fixed inset-0 z-40 md:hidden">
           <div className="absolute inset-0 bg-black/60" onClick={() => setOpen(false)} />
-          <aside className="absolute left-0 top-0 flex h-full w-72 flex-col border-r border-border bg-card p-4 shadow-xl">
+          <aside className="absolute left-0 top-0 flex h-full w-80 max-w-[90vw] flex-col border-r border-border bg-card p-4 shadow-xl">
             <div className="mb-4 flex items-center justify-between px-1">
               <div className="flex items-center gap-2">
                 <span className="text-sm font-semibold tracking-wide text-foreground">Construct</span>

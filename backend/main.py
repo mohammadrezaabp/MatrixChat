@@ -65,6 +65,7 @@ class ThreadModel(Base):
     id        = Column(String, primary_key=True)
     user_id   = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     schema_id = Column(String, ForeignKey("sql_schemas.id", ondelete="SET NULL"), nullable=True, index=True)
+    sql_model = Column(String, nullable=True)
     title     = Column(String, nullable=False)
     mode      = Column(String, nullable=False)          # 'chat' | 'sql'
     updated_at = Column(BigInteger, nullable=False)     # epoch ms
@@ -115,6 +116,7 @@ def init_db():
         Base.metadata.create_all(bind=engine)
         ensure_auth_schema()
         ensure_thread_schema_column()
+        ensure_thread_sql_model_column()
         ensure_schema_faq_column()
         print("[db] tables ready")
     else:
@@ -143,6 +145,19 @@ RETRIABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 CHAT_MODEL_NAME = os.getenv("CHAT_MODEL_NAME", AI_SERVICE_MODEL)
 SQL_MODEL_NAME = os.getenv("SQL_MODEL_NAME", AI_SERVICE_MODEL)
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
+OLLAMA_SQL_MODEL = os.getenv("OLLAMA_SQL_MODEL", "qwen2.5-coder:7b-instruct-q4_K_M")
+OLLAMA_SQL_NUM_CTX = int(os.getenv("OLLAMA_SQL_NUM_CTX", "1024"))
+OLLAMA_SQL_NUM_PREDICT = int(os.getenv("OLLAMA_SQL_NUM_PREDICT", "256"))
+OLLAMA_SQL_NUM_BATCH = int(os.getenv("OLLAMA_SQL_NUM_BATCH", "128"))
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
+OLLAMA_MAX_RETRIES = int(os.getenv("OLLAMA_MAX_RETRIES", "1"))
+OLLAMA_INITIAL_RETRY_DELAY_SECONDS = float(os.getenv("OLLAMA_INITIAL_RETRY_DELAY_SECONDS", "0.5"))
+OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "120"))
+OLLAMA_SCHEMA_SUMMARY_MAX_CHARS = int(os.getenv("OLLAMA_SCHEMA_SUMMARY_MAX_CHARS", "2200"))
+OLLAMA_SCHEMA_FAQ_MAX_CHARS = int(os.getenv("OLLAMA_SCHEMA_FAQ_MAX_CHARS", "1200"))
+SQL_PROVIDER_DEEPSEEK = "deepseek"
+SQL_PROVIDER_OLLAMA = "ollama"
 
 # Context windows remain for prompt-shaping logic even though the remote API
 # uses max_tokens rather than a local model context window.
@@ -257,6 +272,8 @@ class TextToSqlRequest(BaseModel):
     schemaId: Optional[str] = None
     model: Optional[str] = None
     messages: Optional[list[TextToSqlMessage]] = None
+    threadId: Optional[str] = None
+    assistantMessageId: Optional[str] = None
 
 class TextToSqlResponse(BaseModel):
     sql: str
@@ -279,6 +296,7 @@ class ThreadSchema(BaseModel):
     title: str
     mode: str
     schemaId: Optional[str] = None
+    sqlModel: Optional[str] = None
     updatedAt: int
     messages: list[MessageSchema] = []
 
@@ -422,6 +440,19 @@ def ensure_thread_schema_column() -> None:
         return
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE threads ADD COLUMN schema_id VARCHAR NULL"))
+
+
+def ensure_thread_sql_model_column() -> None:
+    if engine is None:
+        return
+    insp = inspect(engine)
+    if not insp.has_table("threads"):
+        return
+    thread_columns = {col["name"] for col in insp.get_columns("threads")}
+    if "sql_model" in thread_columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE threads ADD COLUMN sql_model VARCHAR NULL"))
 
 
 def ensure_schema_faq_column() -> None:
@@ -651,6 +682,53 @@ async def post_ai_completion(client: httpx.AsyncClient, payload: dict) -> httpx.
     if last_error is not None:
         raise last_error
     raise RuntimeError("AI service request failed")
+
+
+def resolve_sql_provider(model_hint: Optional[str]) -> str:
+    hint = (model_hint or "").strip().lower()
+    if hint in {SQL_PROVIDER_OLLAMA, OLLAMA_SQL_MODEL.lower()}:
+        return SQL_PROVIDER_OLLAMA
+    return SQL_PROVIDER_DEEPSEEK
+
+
+def build_ollama_chat_url() -> str:
+    return f"{OLLAMA_BASE_URL.rstrip('/')}/api/chat"
+
+
+def extract_ollama_message_content(payload: dict) -> str:
+    message = payload.get("message") or {}
+    if isinstance(message, dict) and message.get("content"):
+        return message.get("content", "")
+    return ""
+
+
+def compact_prompt_text(text: str, max_chars: int) -> str:
+    cleaned = (text or "").strip()
+    if max_chars <= 0 or len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[: max_chars - 3].rstrip() + "..."
+
+
+async def post_ollama_chat_completion(client: httpx.AsyncClient, payload: dict) -> httpx.Response:
+    url = build_ollama_chat_url()
+    last_error: Exception | None = None
+
+    for attempt in range(max(OLLAMA_MAX_RETRIES, 1)):
+        try:
+            response = await client.post(url, json=payload)
+            if response.status_code not in RETRIABLE_STATUS_CODES or attempt >= OLLAMA_MAX_RETRIES - 1:
+                return response
+            last_error = HTTPException(status_code=response.status_code, detail=response.text)
+        except httpx.RequestError as exc:
+            last_error = exc
+            if attempt >= OLLAMA_MAX_RETRIES - 1:
+                raise
+
+        await asyncio.sleep(OLLAMA_INITIAL_RETRY_DELAY_SECONDS * (2 ** attempt))
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Ollama request failed")
 
 
 async def warm_sql_schema_context(schema_id: str, schema_summary: str) -> None:
@@ -895,6 +973,7 @@ def _thread_to_schema(t: ThreadModel) -> ThreadSchema:
         title=t.title,
         mode=t.mode,
         schemaId=t.schema_id,
+        sqlModel=t.sql_model,
         updatedAt=t.updated_at,
         messages=[
             MessageSchema(
@@ -953,8 +1032,19 @@ def upsert_thread(thread_id: str, body: UpsertThreadRequest,
         raise HTTPException(status_code=400, detail="Thread id mismatch")
 
     schema_id = data.schemaId if data.mode == "sql" else None
+    sql_model = data.sqlModel if data.mode == "sql" else None
     if data.mode == "sql" and not schema_id:
         raise HTTPException(status_code=400, detail="SQL threads require a schema")
+    if data.mode == "sql" and not sql_model:
+        sql_model = SQL_PROVIDER_DEEPSEEK
+
+    if sql_model and sql_model not in {
+        SQL_PROVIDER_DEEPSEEK,
+        SQL_PROVIDER_OLLAMA,
+        SQL_MODEL_NAME,
+        OLLAMA_SQL_MODEL,
+    }:
+        raise HTTPException(status_code=400, detail="Invalid SQL model")
     if schema_id is not None:
         schema_exists = (
             db.query(SqlSchemaModel)
@@ -966,6 +1056,8 @@ def upsert_thread(thread_id: str, body: UpsertThreadRequest,
 
     if t is not None and t.mode == "sql" and t.schema_id is not None and schema_id != t.schema_id:
         raise HTTPException(status_code=400, detail="Schema cannot be changed for an existing SQL thread")
+    if t is not None and t.mode == "sql" and t.sql_model is not None and sql_model != t.sql_model:
+        raise HTTPException(status_code=400, detail="SQL model cannot be changed for an existing SQL thread")
 
     def apply_messages() -> None:
         for pos, msg in enumerate(data.messages):
@@ -986,11 +1078,20 @@ def upsert_thread(thread_id: str, body: UpsertThreadRequest,
                     created_at=int(datetime.now(timezone.utc).timestamp() * 1000),
                 ))
 
+    next_message_ids = [msg.id for msg in data.messages]
+
+    def cleanup_stale_prompts() -> None:
+        stale_query = db.query(PromptModel).filter(PromptModel.thread_id == thread_id)
+        if next_message_ids:
+            stale_query = stale_query.filter(~PromptModel.message_id.in_(next_message_ids))
+        stale_query.delete(synchronize_session=False)
+
     if t is None:
         existing_other = db.query(ThreadModel).filter(ThreadModel.id == thread_id).first()
         if existing_other is not None:
             raise HTTPException(status_code=404, detail="Thread not found")
         t = ThreadModel(id=data.id, user_id=current_user.id, schema_id=schema_id,
+                        sql_model=sql_model,
                         title=data.title, mode=data.mode,
                         updated_at=data.updatedAt)
         db.add(t)
@@ -1010,20 +1111,22 @@ def upsert_thread(thread_id: str, body: UpsertThreadRequest,
             t.title = data.title
             t.mode = data.mode
             t.schema_id = schema_id
+            t.sql_model = sql_model
             t.updated_at = data.updatedAt
             db.query(MessageModel).filter(MessageModel.thread_id == thread_id).delete()
-            db.query(PromptModel).filter(PromptModel.thread_id == thread_id).delete()
             apply_messages()
+            cleanup_stale_prompts()
             db.commit()
     else:
         t.title = data.title
         t.mode = data.mode
         t.schema_id = schema_id
+        t.sql_model = sql_model
         t.updated_at = data.updatedAt
         # Delete existing messages; we replace them wholesale.
         db.query(MessageModel).filter(MessageModel.thread_id == thread_id).delete()
-        db.query(PromptModel).filter(PromptModel.thread_id == thread_id).delete()
         apply_messages()
+        cleanup_stale_prompts()
         db.commit()
 
     db.refresh(t)
@@ -1152,7 +1255,8 @@ async def text_to_sql(
 
         schema_summary = get_schema_summary_cached(user_schema.id, user_schema.schema_text)
         schema_faq = (user_schema.schema_faq or "").strip()
-        model = request.model or SQL_MODEL_NAME
+        sql_provider = resolve_sql_provider(request.model)
+        model = OLLAMA_SQL_MODEL if sql_provider == SQL_PROVIDER_OLLAMA else SQL_MODEL_NAME
         last_sql = extract_last_sql(request.messages, request.query)
         is_enhancement = _is_enhancement_request(request.query)
 
@@ -1200,18 +1304,54 @@ async def text_to_sql(
             f"{task_block}"
         )
 
-        async with httpx.AsyncClient(timeout=AI_SERVICE_TIMEOUT_SECONDS) as client:
-            response = await post_ai_completion(
-                client,
-                build_chat_payload(
-                    [
-                        {"role": "system", "content": f"{SQL_SYSTEM_PROMPT}\n\n{SQL_RULES}"},
-                        {"role": "user", "content": prompt},
-                    ],
-                    model,
-                    temperature=max(0.0, min(SQL_TEMPERATURE, 0.3)),
-                ),
+        if sql_provider == SQL_PROVIDER_OLLAMA:
+            compact_schema = compact_prompt_text(schema_summary, OLLAMA_SCHEMA_SUMMARY_MAX_CHARS)
+            compact_faq = compact_prompt_text(schema_faq or "N/A", OLLAMA_SCHEMA_FAQ_MAX_CHARS)
+            prompt = (
+                "Generate exactly one read-only SQL query. "
+                "Output format: first line starts with '-- Reason:' then one SQL statement ending with ';'.\n\n"
+                "Rules: SELECT-only. Never write INSERT/UPDATE/DELETE/CREATE/DROP/ALTER/TRUNCATE. "
+                "Use only tables/columns from schema.\n\n"
+                f"SCHEMA:\n{compact_schema}\n\n"
+                f"FAQ:\n{compact_faq}\n\n"
+                f"REQUEST: {request.query}\n"
+                "SQL:"
             )
+
+        provider_timeout = OLLAMA_TIMEOUT_SECONDS if sql_provider == SQL_PROVIDER_OLLAMA else AI_SERVICE_TIMEOUT_SECONDS
+
+        async with httpx.AsyncClient(timeout=provider_timeout) as client:
+            if sql_provider == SQL_PROVIDER_OLLAMA:
+                response = await post_ollama_chat_completion(
+                    client,
+                    {
+                        "model": model,
+                        "stream": False,
+                        "keep_alive": OLLAMA_KEEP_ALIVE,
+                        "messages": [
+                            {"role": "system", "content": "You are a SQL assistant. Return read-only SQL only."},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "options": {
+                            "temperature": max(0.0, min(SQL_TEMPERATURE, 0.3)),
+                            "num_ctx": max(256, OLLAMA_SQL_NUM_CTX),
+                            "num_predict": max(64, OLLAMA_SQL_NUM_PREDICT),
+                            "num_batch": max(32, OLLAMA_SQL_NUM_BATCH),
+                        },
+                    },
+                )
+            else:
+                response = await post_ai_completion(
+                    client,
+                    build_chat_payload(
+                        [
+                            {"role": "system", "content": f"{SQL_SYSTEM_PROMPT}\n\n{SQL_RULES}"},
+                            {"role": "user", "content": prompt},
+                        ],
+                        model,
+                        temperature=max(0.0, min(SQL_TEMPERATURE, 0.3)),
+                    ),
+                )
 
         if response.status_code != 200:
             raise HTTPException(
@@ -1220,7 +1360,10 @@ async def text_to_sql(
             )
 
         result = response.json()
-        raw_response = extract_ai_message_content(result).strip()
+        if sql_provider == SQL_PROVIDER_OLLAMA:
+            raw_response = extract_ollama_message_content(result).strip()
+        else:
+            raw_response = extract_ai_message_content(result).strip()
         print(f"[sql] raw model response: {raw_response!r}")
         sql_query = extract_sql_from_response(raw_response)
         sql_query = ensure_sql_comments(sql_query, request.query)
@@ -1228,6 +1371,37 @@ async def text_to_sql(
         is_safe, reason = is_select_only_sql(sql_query)
         if not is_safe:
             raise HTTPException(status_code=422, detail=f"Unsafe SQL blocked: {reason}")
+
+        if request.threadId and request.assistantMessageId:
+            thread = (
+                db.query(ThreadModel)
+                .filter(ThreadModel.id == request.threadId, ThreadModel.user_id == _current_user.id)
+                .first()
+            )
+            if thread is not None:
+                existing_prompt = (
+                    db.query(PromptModel)
+                    .filter(
+                        PromptModel.thread_id == request.threadId,
+                        PromptModel.message_id == request.assistantMessageId,
+                    )
+                    .first()
+                )
+                now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+                if existing_prompt is None:
+                    db.add(
+                        PromptModel(
+                            id=secrets.token_urlsafe(12),
+                            thread_id=request.threadId,
+                            message_id=request.assistantMessageId,
+                            prompt_text=prompt,
+                            created_at=now_ms,
+                        )
+                    )
+                else:
+                    existing_prompt.prompt_text = prompt
+                    existing_prompt.created_at = now_ms
+                db.commit()
 
         return TextToSqlResponse(
             sql=sql_query,
@@ -1237,14 +1411,29 @@ async def text_to_sql(
         )
 
     except httpx.ConnectError:
+        if resolve_sql_provider(request.model) == SQL_PROVIDER_OLLAMA:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Cannot connect to Ollama service at {OLLAMA_BASE_URL}."
+            )
         raise HTTPException(
             status_code=503,
             detail=f"Cannot connect to AI service at {AI_SERVICE_BASE_URL}."
         )
+    except httpx.ReadTimeout:
+        if resolve_sql_provider(request.model) == SQL_PROVIDER_OLLAMA:
+            raise HTTPException(
+                status_code=504,
+                detail=(
+                    "Ollama timed out while generating SQL. "
+                    "Try a shorter request or smaller schema/FAQ."
+                ),
+            )
+        raise HTTPException(status_code=504, detail="AI service timed out")
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e) or "Unexpected server error")
 
 @app.post("/chat")
 async def chat(

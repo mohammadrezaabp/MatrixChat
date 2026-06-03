@@ -18,6 +18,7 @@ interface Thread {
   title: string
   mode: Mode
   schemaId?: string | null
+  sqlModel?: string | null
   messages: Message[]
   updatedAt: number
 }
@@ -38,6 +39,17 @@ interface UserSchema {
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 const ACTIVE_THREAD_STORAGE_KEY = 'construct.activeThreadId'
 const WELCOME_TEXT = 'Welcome to Construct...'
+const DEEPSEEK_SQL_PROVIDER = 'deepseek'
+const OLLAMA_SQL_PROVIDER = 'ollama'
+
+const SQL_MODEL_OPTIONS = [
+  { id: DEEPSEEK_SQL_PROVIDER, title: 'DeepSeek-V4-Pro' },
+  { id: OLLAMA_SQL_PROVIDER, title: 'Ollama qwen2.5-coder:7b-instruct-q4_K_M' },
+] as const
+
+function formatSqlModelTitle(model: string | null | undefined) {
+  return SQL_MODEL_OPTIONS.find((option) => option.id === model)?.title || 'DeepSeek-V4-Pro'
+}
 
 function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
@@ -64,6 +76,7 @@ function newThread(mode: Mode): Thread {
     title: mode === 'sql' ? 'New SQL query' : 'New chat',
     mode,
     schemaId: null,
+    sqlModel: mode === 'sql' ? DEEPSEEK_SQL_PROVIDER : null,
     messages: [greeting(mode)],
     updatedAt: Date.now(),
   }
@@ -190,6 +203,9 @@ export default function ChatPage() {
   const [schemaEditorOpen, setSchemaEditorOpen] = useState(false)
   const [sqlThreadSchemaPickerOpen, setSqlThreadSchemaPickerOpen] = useState(false)
   const [selectedSchemaForNewSqlThread, setSelectedSchemaForNewSqlThread] = useState<string | null>(null)
+  const [selectedModelForNewSqlThread, setSelectedModelForNewSqlThread] = useState<string>(DEEPSEEK_SQL_PROVIDER)
+  const [schemaDropdownOpen, setSchemaDropdownOpen] = useState(false)
+  const [modelDropdownOpen, setModelDropdownOpen] = useState(false)
   const [createSqlThreadOnSchemaSave, setCreateSqlThreadOnSchemaSave] = useState(false)
   const [isSavingSchema, setIsSavingSchema] = useState(false)
   const [profileEditorOpen, setProfileEditorOpen] = useState(false)
@@ -287,6 +303,16 @@ export default function ChatPage() {
   const active = threads.find(t => t.id === activeId) || null
   const activeThreadIsSending = !!active && !!sendingThreads[active.id]
 
+  const findRetryPrompt = useCallback((messages: Message[], fromIndex: number): string | null => {
+    for (let i = fromIndex - 1; i >= 0; i -= 1) {
+      const candidate = messages[i]
+      if (candidate.role === 'user' && candidate.content.trim()) {
+        return candidate.content
+      }
+    }
+    return null
+  }, [])
+
   useEffect(() => {
     if (activeId) {
       setTypedWelcome(WELCOME_TEXT)
@@ -318,12 +344,15 @@ export default function ChatPage() {
     [activeId]
   )
 
-  const startSqlThreadWithSchema = useCallback((schemaId: string) => {
+  const startSqlThreadWithSchema = useCallback((schemaId: string, sqlModel: string) => {
     const t = newThread('sql')
     t.schemaId = schemaId
+    t.sqlModel = sqlModel
     setThreads(prev => [t, ...prev])
     setActiveId(t.id)
     setSqlThreadSchemaPickerOpen(false)
+    setSchemaDropdownOpen(false)
+    setModelDropdownOpen(false)
     setCreateSqlThreadOnSchemaSave(false)
     setError(null)
   }, [])
@@ -338,17 +367,22 @@ export default function ChatPage() {
     if (!isSelectedValid) {
       setSelectedSchemaForNewSqlThread(schemas[0].id)
     }
-  }, [sqlThreadSchemaPickerOpen, schemas, selectedSchemaForNewSqlThread])
+    if (!SQL_MODEL_OPTIONS.some((m) => m.id === selectedModelForNewSqlThread)) {
+      setSelectedModelForNewSqlThread(DEEPSEEK_SQL_PROVIDER)
+    }
+  }, [sqlThreadSchemaPickerOpen, schemas, selectedSchemaForNewSqlThread, selectedModelForNewSqlThread])
 
   const handleNewChat = (mode: Mode) => {
     if (mode === 'sql') {
       if (schemas.length === 0) {
+        setSelectedModelForNewSqlThread(DEEPSEEK_SQL_PROVIDER)
         setCreateSqlThreadOnSchemaSave(true)
         setSqlThreadSchemaPickerOpen(false)
         handleCreateSchema()
         return
       }
       setSelectedSchemaForNewSqlThread(schemas[0].id)
+      setSelectedModelForNewSqlThread(DEEPSEEK_SQL_PROVIDER)
       setSqlThreadSchemaPickerOpen(true)
       setError(null)
       return
@@ -391,6 +425,7 @@ export default function ChatPage() {
     title: t.title,
     mode: t.mode,
     schemaId: t.schemaId,
+    sqlModel: t.sqlModel,
     updatedAt: t.updatedAt,
   }))
 
@@ -596,6 +631,9 @@ export default function ChatPage() {
         body: JSON.stringify({
           query: userMessage,
           schemaId: active.schemaId,
+          model: active.sqlModel || DEEPSEEK_SQL_PROVIDER,
+          threadId: activeThreadId,
+          assistantMessageId: assistantId,
           messages: historyForApi,
         }),
       })
@@ -682,7 +720,7 @@ export default function ChatPage() {
       })
 
       if (createSqlThreadOnSchemaSave) {
-        startSqlThreadWithSchema(saved.id)
+        startSqlThreadWithSchema(saved.id, selectedModelForNewSqlThread)
       }
 
       setEditingSchemaId(saved.id)
@@ -846,9 +884,14 @@ export default function ChatPage() {
           {active && (
             <div className="mb-4 flex items-center justify-between gap-2">
               {active.mode === 'sql' && (
-                <span className="rounded-full border border-border bg-background/50 px-3 py-1.5 text-xs font-medium text-foreground">
-                  Schema: {schemaSummaries.find((schema) => schema.id === active.schemaId)?.title || 'Unknown schema'}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="rounded-full border border-border bg-background/50 px-3 py-1.5 text-xs font-medium text-foreground">
+                    Schema: {schemaSummaries.find((schema) => schema.id === active.schemaId)?.title || 'Unknown schema'}
+                  </span>
+                  <span className="rounded-full border border-border bg-background/50 px-3 py-1.5 text-xs font-medium text-foreground">
+                    Model: {formatSqlModelTitle(active.sqlModel)}
+                  </span>
+                </div>
               )}
               <button
                 type="button"
@@ -891,19 +934,35 @@ export default function ChatPage() {
             </div>
           ) : (
             <div className="matrix-scrollbar flex-1 min-h-0 overflow-y-auto space-y-4 rounded-3xl border border-border bg-card/35 p-4 shadow-[0_20px_60px_-30px_rgba(0,0,0,0.65)] sm:p-6">
-              {active.messages.map((message) => (
-                <ChatMessage
-                  key={message.id}
-                  role={message.role}
-                  content={message.content}
-                  isSql={message.isSql}
-                  isLoading={
-                    activeThreadIsSending &&
-                    message.role === 'assistant' &&
-                    !message.content
-                  }
-                />
-              ))}
+              {active.messages.map((message, index) => {
+                const isAssistantError =
+                  message.role === 'assistant' && message.content.trim().startsWith('[Error]')
+                const retryPrompt = isAssistantError
+                  ? findRetryPrompt(active.messages, index)
+                  : null
+
+                return (
+                  <ChatMessage
+                    key={message.id}
+                    role={message.role}
+                    content={message.content}
+                    isSql={message.isSql}
+                    isLoading={
+                      activeThreadIsSending &&
+                      message.role === 'assistant' &&
+                      !message.content
+                    }
+                    onRetry={
+                      retryPrompt
+                        ? () => {
+                            void handleSendMessage(retryPrompt)
+                          }
+                        : undefined
+                    }
+                    retryDisabled={activeThreadIsSending}
+                  />
+                )
+              })}
               <div ref={messagesEndRef} />
             </div>
           )}
@@ -938,6 +997,8 @@ export default function ChatPage() {
             aria-label="Close schema picker"
             onClick={() => {
               setSqlThreadSchemaPickerOpen(false)
+              setSchemaDropdownOpen(false)
+              setModelDropdownOpen(false)
               setCreateSqlThreadOnSchemaSave(false)
             }}
             className="absolute inset-0 bg-black/60"
@@ -954,6 +1015,8 @@ export default function ChatPage() {
                 type="button"
                 onClick={() => {
                   setSqlThreadSchemaPickerOpen(false)
+                  setSchemaDropdownOpen(false)
+                  setModelDropdownOpen(false)
                   setCreateSqlThreadOnSchemaSave(false)
                 }}
                 className="rounded-md border border-border bg-background/40 px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
@@ -968,17 +1031,91 @@ export default function ChatPage() {
                   No schemas yet. Add one to start a SQL thread.
                 </p>
               ) : (
-                <select
-                  value={selectedSchemaForNewSqlThread || ''}
-                  onChange={(e) => setSelectedSchemaForNewSqlThread(e.target.value || null)}
-                  className="w-full rounded-xl border border-border bg-background/60 px-3 py-2 text-sm text-foreground outline-none focus:border-primary"
-                >
-                  {schemaSummaries.map((schema) => (
-                    <option key={schema.id} value={schema.id}>
-                      {schema.title}
-                    </option>
-                  ))}
-                </select>
+                <>
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSchemaDropdownOpen((v) => !v)
+                        setModelDropdownOpen(false)
+                      }}
+                      className="inline-flex w-full items-center justify-between gap-2 rounded-xl border border-border bg-background/50 px-3 py-2 text-sm text-foreground transition-all hover:border-primary"
+                    >
+                      <span className="truncate">
+                        {schemaSummaries.find((schema) => schema.id === selectedSchemaForNewSqlThread)?.title || 'Choose schema'}
+                      </span>
+                      <svg
+                        width="12"
+                        height="12"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        aria-hidden
+                        className={`transition-transform ${schemaDropdownOpen ? 'rotate-180' : ''}`}
+                      >
+                        <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </button>
+                    {schemaDropdownOpen && (
+                      <div className="absolute left-0 right-0 top-full z-20 mt-1 max-h-56 overflow-y-auto rounded-xl border border-border bg-card shadow-lg">
+                        {schemaSummaries.map((schema) => (
+                          <button
+                            key={schema.id}
+                            type="button"
+                            onClick={() => {
+                              setSelectedSchemaForNewSqlThread(schema.id)
+                              setSchemaDropdownOpen(false)
+                            }}
+                            className={`block w-full px-3 py-2 text-left text-sm transition-colors hover:bg-background/60 ${selectedSchemaForNewSqlThread === schema.id ? 'bg-primary/10 text-foreground' : 'text-muted-foreground'}`}
+                          >
+                            {schema.title}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setModelDropdownOpen((v) => !v)
+                        setSchemaDropdownOpen(false)
+                      }}
+                      className="inline-flex w-full items-center justify-between gap-2 rounded-xl border border-border bg-background/50 px-3 py-2 text-sm text-foreground transition-all hover:border-primary"
+                    >
+                      <span className="truncate">
+                        {SQL_MODEL_OPTIONS.find((m) => m.id === selectedModelForNewSqlThread)?.title || 'Choose model'}
+                      </span>
+                      <svg
+                        width="12"
+                        height="12"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        aria-hidden
+                        className={`transition-transform ${modelDropdownOpen ? 'rotate-180' : ''}`}
+                      >
+                        <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </button>
+                    {modelDropdownOpen && (
+                      <div className="absolute left-0 right-0 top-full z-20 mt-1 max-h-56 overflow-y-auto rounded-xl border border-border bg-card shadow-lg">
+                        {SQL_MODEL_OPTIONS.map((modelOption) => (
+                          <button
+                            key={modelOption.id}
+                            type="button"
+                            onClick={() => {
+                              setSelectedModelForNewSqlThread(modelOption.id)
+                              setModelDropdownOpen(false)
+                            }}
+                            className={`block w-full px-3 py-2 text-left text-sm transition-colors hover:bg-background/60 ${selectedModelForNewSqlThread === modelOption.id ? 'bg-primary/10 text-foreground' : 'text-muted-foreground'}`}
+                          >
+                            {modelOption.title}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </>
               )}
             </div>
 
@@ -987,7 +1124,7 @@ export default function ChatPage() {
                 type="button"
                 onClick={() => {
                   if (!selectedSchemaForNewSqlThread) return
-                  startSqlThreadWithSchema(selectedSchemaForNewSqlThread)
+                  startSqlThreadWithSchema(selectedSchemaForNewSqlThread, selectedModelForNewSqlThread)
                 }}
                 disabled={!selectedSchemaForNewSqlThread}
                 className="rounded-xl border border-primary bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-70"
@@ -999,6 +1136,8 @@ export default function ChatPage() {
                 onClick={() => {
                   setCreateSqlThreadOnSchemaSave(true)
                   setSqlThreadSchemaPickerOpen(false)
+                  setSchemaDropdownOpen(false)
+                  setModelDropdownOpen(false)
                   handleCreateSchema()
                 }}
                 className="rounded-xl border border-primary bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground"
