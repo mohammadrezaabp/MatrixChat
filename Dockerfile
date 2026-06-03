@@ -5,17 +5,19 @@ WORKDIR /app
 # Copy package files
 COPY package.json package-lock.json ./
 
-# Install dependencies with npm
+# Install dependencies
 RUN npm ci
 
 # Copy application code
 COPY . .
 
+# Build Next.js app for production
+RUN npm run build
+
 # Expose port
 EXPOSE 3000
 
-# Set environment variable for Next.js
-ENV NODE_ENV=development
+ENV NODE_ENV=production
 
-# Run the application in dev mode for localhost development
-CMD ["npm", "run", "dev", "--", "--hostname", "0.0.0.0", "--port", "3000"]
+# Run the application in production mode
+CMD ["npm", "run", "start", "--", "-H", "0.0.0.0", "-p", "3000"]

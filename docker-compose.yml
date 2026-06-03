@@ -10,6 +10,11 @@ services:
       - OLLAMA_HOST=0.0.0.0:11434
       - OLLAMA_KEEP_ALIVE=60m
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
 
   postgres:
     image: postgres:16-alpine
@@ -45,8 +50,8 @@ services:
       - SQL_NUM_CTX=4096
       - SQL_WARMUP_NUM_CTX=2048
       - SQL_TEMPERATURE=0.1
-      - PULL_MODELS=false
-      - LOCAL_ONLY=true
+      - PULL_MODELS=true
+      - LOCAL_ONLY=false
       - DATABASE_URL=postgresql://matrixchat:matrixchat@postgres:5432/matrixchat
       - AUTH_SECRET=change-this-secret-in-production
       - SESSION_TTL_SECONDS=604800
@@ -54,9 +59,22 @@ services:
       postgres:
         condition: service_healthy
       ollama:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: matrix-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://95.38.232.107:8000
+      - NODE_ENV=production
+    depends_on:
+      backend:
         condition: service_started
-    volumes:
-      - ./backend:/app
     restart: unless-stopped
 
 volumes:

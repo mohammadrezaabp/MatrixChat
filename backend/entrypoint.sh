@@ -12,7 +12,7 @@ for i in {1..30}; do
 done
 
 CHAT_MODEL_NAME=${CHAT_MODEL_NAME:-${MODEL_NAME:-llama3.2:1b}}
-SQL_MODEL_NAME=${SQL_MODEL_NAME:-qwen2.5-coder:1.5b}
+SQL_MODEL_NAME=${SQL_MODEL_NAME:-qwen2.5-coder:7b-instruct-q4_K_M}
 PULL_MODELS=${PULL_MODELS:-false}
 
 pull_if_missing() {
