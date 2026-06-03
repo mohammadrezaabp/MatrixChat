@@ -444,7 +444,7 @@ export function ChatSidebar({
       {/* Desktop sidebar */}
       <aside className="hidden h-dvh w-72 shrink-0 flex-col border-r border-border/70 bg-card/40 p-4 backdrop-blur md:flex">
         <div className="mb-4 px-1 text-center">
-          <span className="text-lg font-semibold tracking-wide text-foreground">Construct</span>
+          <span className="text-lg font-semibold tracking-wide text-foreground">Construct V1.0.0.0</span>
         </div>
         {sidebarBody}
         {onLogout && (
