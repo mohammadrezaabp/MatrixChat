@@ -55,7 +55,7 @@ services:
       - DATABASE_URL=postgresql://matrixchat:matrixchat@postgres:5432/matrixchat
       - AUTH_SECRET=change-this-secret-in-production
       - SESSION_TTL_SECONDS=604800
-      - CORS_ALLOW_ORIGINS=http://95.38.232.107:3000
+      - CORS_ALLOW_ORIGINS=http://localhost:3000
     depends_on:
       postgres:
         condition: service_healthy
@@ -68,12 +68,12 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_API_URL: http://95.38.232.107:8000
+        NEXT_PUBLIC_API_URL: http://localhost:8000
     container_name: matrix-frontend
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://95.38.232.107:8000
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
       - NODE_ENV=production
     depends_on:
       backend:

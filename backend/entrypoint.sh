@@ -39,10 +39,18 @@ pull_if_missing() {
   fi
 }
 
-pull_if_missing "$CHAT_MODEL_NAME"
-if [ "$SQL_MODEL_NAME" != "$CHAT_MODEL_NAME" ]; then
-  pull_if_missing "$SQL_MODEL_NAME"
-fi
+pull_models_background() {
+  if [ "$PULL_MODELS" != "true" ]; then
+    return 0
+  fi
+
+  pull_if_missing "$CHAT_MODEL_NAME"
+  if [ "$SQL_MODEL_NAME" != "$CHAT_MODEL_NAME" ]; then
+    pull_if_missing "$SQL_MODEL_NAME"
+  fi
+}
+
+pull_models_background &
 
 echo "Installed models:"
 curl -s http://ollama:11434/api/tags || true
