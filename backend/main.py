@@ -770,6 +770,8 @@ def build_options(num_ctx: int, num_predict: Optional[int] = None,
         "temperature": temperature,
         "top_p": top_p,
         "num_ctx": num_ctx,
+        "use_mmap": True,  # Add this
+        "num_gpu": 0,      # Explicitly CPU-only
     }
     if num_predict is not None:
         opts["num_predict"] = num_predict
@@ -806,10 +808,15 @@ async def warm_model(model: str, num_ctx: int) -> None:
 @app.on_event("startup")
 async def startup_warmup() -> None:
     init_db()
-    # Don't block startup — warm in the background.
-    asyncio.create_task(warm_model(CHAT_MODEL_NAME, CHAT_NUM_CTX))
-    asyncio.create_task(warm_model(SQL_MODEL_NAME, SQL_NUM_CTX))
-    asyncio.create_task(warm_recent_schema_contexts())
+    # Minimal warmup - just load model weights, don't fill context
+    asyncio.create_task(warm_model(CHAT_MODEL_NAME, 256))  # Minimal context
+    asyncio.create_task(warm_model(SQL_MODEL_NAME, 256))
+    # Schema warmups can wait a few seconds
+    asyncio.create_task(delayed_schema_warmup())
+
+async def delayed_schema_warmup():
+    await asyncio.sleep(5)  # Let model loading finish first
+    await warm_recent_schema_contexts()
 
 
 @app.get("/health")

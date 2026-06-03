@@ -9,6 +9,8 @@ services:
     environment:
       - OLLAMA_HOST=0.0.0.0:11434
       - OLLAMA_KEEP_ALIVE=60m
+      - OLLAMA_MMAP=true
+      - OLLAMA_NUM_THREAD=4 
     restart: unless-stopped
 
   postgres:
@@ -42,8 +44,8 @@ services:
       - CHAT_MODEL_NAME=llama3.2:1b
       - SQL_MODEL_NAME=qwen2.5-coder:7b-instruct-q4_K_M
       - OLLAMA_KEEP_ALIVE=60m
-      - CHAT_NUM_CTX=2048
-      - SQL_NUM_CTX=4096
+      - CHAT_NUM_CTX=1024
+      - SQL_NUM_CTX=2048
       - SQL_WARMUP_NUM_CTX=2048
       - SQL_TEMPERATURE=0.1
       - PULL_MODELS=false
