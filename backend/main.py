@@ -107,32 +107,30 @@ def init_db():
 
 app = FastAPI()
 
-raw_cors_origins = os.getenv(
-    "CORS_ALLOW_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000",
-)
-CORS_ALLOW_ORIGINS = [o.strip() for o in raw_cors_origins.split(",") if o.strip()]
-
+# Enable CORS for Next.js frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ALLOW_ORIGINS,
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Configuration
-OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://host.docker.internal:11434")
+AI_SERVICE_BASE_URL = os.getenv("AI_SERVICE_BASE_URL", "https://gpu1-llm.emofid.com/")
+AI_SERVICE_API_KEY = os.getenv("AI_SERVICE_API_KEY", "")
+AI_SERVICE_MODEL = os.getenv("AI_SERVICE_MODEL", "DeepSeek-V4-Pro")
+AI_SERVICE_COMPLETIONS_PATH = os.getenv("AI_SERVICE_COMPLETIONS_PATH", "v1/chat/completions")
+AI_SERVICE_MAX_RETRIES = int(os.getenv("AI_SERVICE_MAX_RETRIES", "3"))
+AI_SERVICE_INITIAL_RETRY_DELAY_SECONDS = float(os.getenv("AI_SERVICE_INITIAL_RETRY_DELAY_SECONDS", "2"))
+AI_SERVICE_TIMEOUT_SECONDS = float(os.getenv("AI_SERVICE_TIMEOUT_SECONDS", "120"))
+RETRIABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
-# Use small, fast models tuned for CPU / 8GB RAM laptops.
-# Override via env if you want to try bigger ones.
-CHAT_MODEL_NAME = os.getenv("CHAT_MODEL_NAME", os.getenv("MODEL_NAME", "llama3.2:1b"))
-SQL_MODEL_NAME = os.getenv("SQL_MODEL_NAME", "qwen2.5-coder:7b-instruct-q4_K_M")
+CHAT_MODEL_NAME = os.getenv("CHAT_MODEL_NAME", AI_SERVICE_MODEL)
+SQL_MODEL_NAME = os.getenv("SQL_MODEL_NAME", AI_SERVICE_MODEL)
 
-# Keep models hot in RAM so the next request doesn't pay the cold-load tax.
-KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "60m")
-
-# Context windows: smaller = much faster prompt processing on CPU.
+# Context windows remain for prompt-shaping logic even though the remote API
+# uses max_tokens rather than a local model context window.
 CHAT_NUM_CTX = int(os.getenv("CHAT_NUM_CTX", "2048"))
 SQL_NUM_CTX = int(os.getenv("SQL_NUM_CTX", "4096"))
 SQL_WARMUP_NUM_CTX = int(os.getenv("SQL_WARMUP_NUM_CTX", str(min(SQL_NUM_CTX, 2048))))
@@ -141,10 +139,6 @@ SQL_TEMPERATURE = float(os.getenv("SQL_TEMPERATURE", "0.1"))
 
 # Cap how many prior messages we forward (older turns rarely matter and slow CPU inference a lot).
 MAX_CHAT_HISTORY = int(os.getenv("MAX_CHAT_HISTORY", "8"))
-
-# Optional thread count override.
-NUM_THREAD_ENV = os.getenv("OLLAMA_NUM_THREAD")
-NUM_THREAD: Optional[int] = int(NUM_THREAD_ENV) if NUM_THREAD_ENV else None
 
 CHAT_SYSTEM_PROMPT = (
     "You are a concise English assistant. Answer directly in 1-3 short paragraphs. "
@@ -549,40 +543,89 @@ def remove_schema_cache(schema_id: str) -> None:
     WARMED_SCHEMA_IDS.discard(schema_id)
 
 
-def build_schema_warmup_prompt(schema_summary: str) -> str:
-    return (
-        f"{SQL_SYSTEM_PROMPT}\n\n"
-        f"SCHEMA (table: columns):\n{schema_summary}\n\n"
-        f"{SQL_RULES}\n\n"
-        "Warmup task: acknowledge schema context with one token."
-    )
+def build_ai_completion_url() -> str:
+    return f"{AI_SERVICE_BASE_URL.rstrip('/')}/{AI_SERVICE_COMPLETIONS_PATH.lstrip('/')}"
+
+
+def build_ai_headers() -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if AI_SERVICE_API_KEY:
+        headers["Authorization"] = f"Bearer {AI_SERVICE_API_KEY}"
+    return headers
+
+
+def build_chat_payload(
+    messages: list[dict[str, str]],
+    model: str,
+    *,
+    temperature: float,
+    stream: Optional[bool] = None,
+) -> dict:
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+    }
+    if stream is not None:
+        payload["stream"] = stream
+    return payload
+
+
+def extract_ai_message_content(payload: dict) -> str:
+    choices = payload.get("choices") or []
+    if not choices:
+        return ""
+    choice = choices[0] or {}
+    message = choice.get("message") or {}
+    if message.get("content"):
+        return message.get("content", "")
+    delta = choice.get("delta") or {}
+    if delta.get("content"):
+        return delta.get("content", "")
+    if choice.get("text"):
+        return choice.get("text", "")
+    return ""
+
+
+def format_ai_error(response: httpx.Response) -> str:
+    body = (response.text or "").strip()
+    if not body:
+        location = response.headers.get("location")
+        if location:
+            body = f"redirected to {location}"
+    if not body:
+        body = "no response body"
+    return f"{response.status_code} {response.reason_phrase}: {body}"
+
+
+async def post_ai_completion(client: httpx.AsyncClient, payload: dict) -> httpx.Response:
+    url = build_ai_completion_url()
+    headers = build_ai_headers()
+    last_error: Exception | None = None
+
+    for attempt in range(max(AI_SERVICE_MAX_RETRIES, 1)):
+        try:
+            response = await client.post(url, headers=headers, json=payload, follow_redirects=True)
+            if response.status_code not in RETRIABLE_STATUS_CODES or attempt >= AI_SERVICE_MAX_RETRIES - 1:
+                return response
+            last_error = HTTPException(status_code=response.status_code, detail=response.text)
+        except httpx.RequestError as exc:
+            last_error = exc
+            if attempt >= AI_SERVICE_MAX_RETRIES - 1:
+                raise
+
+        await asyncio.sleep(AI_SERVICE_INITIAL_RETRY_DELAY_SECONDS * (2**attempt))
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("AI service request failed")
 
 
 async def warm_sql_schema_context(schema_id: str, schema_summary: str) -> None:
-    """Warm SQL model using schema context so first real query responds faster."""
     if not schema_summary.strip():
         return
-    try:
-        prompt = build_schema_warmup_prompt(schema_summary)
-        async with httpx.AsyncClient(timeout=300) as client:
-            await client.post(
-                f"{OLLAMA_API_URL}/api/generate",
-                json={
-                    "model": SQL_MODEL_NAME,
-                    "prompt": prompt,
-                    "stream": False,
-                    "keep_alive": KEEP_ALIVE,
-                    "options": build_options(
-                        num_ctx=SQL_WARMUP_NUM_CTX,
-                        num_predict=1,
-                        temperature=0.0,
-                    ),
-                },
-            )
-        WARMED_SCHEMA_IDS.add(schema_id)
-        print(f"[warm] SQL schema context ready: {schema_id}")
-    except Exception as exc:
-        print(f"[warm] Could not warm schema context {schema_id}: {exc}")
+    WARMED_SCHEMA_IDS.add(schema_id)
+    print(f"[warm] SQL schema context ready: {schema_id}")
 
 
 async def warm_recent_schema_contexts() -> None:
@@ -767,54 +810,14 @@ def ensure_sql_comments(sql: str, user_query: str) -> str:
     return f"{comment_prefix}\n{body}"
 
 
-def build_options(num_ctx: int, num_predict: Optional[int] = None,
-                  temperature: float = 0.7, top_p: float = 0.9,
-                  top_k: Optional[int] = None, repeat_penalty: Optional[float] = None,
-                  stop: Optional[list[str]] = None) -> dict:
-    opts: dict = {
-        "temperature": temperature,
-        "top_p": top_p,
-        "num_ctx": num_ctx,
-    }
-    if num_predict is not None:
-        opts["num_predict"] = num_predict
-    if top_k is not None:
-        opts["top_k"] = top_k
-    if repeat_penalty is not None:
-        opts["repeat_penalty"] = repeat_penalty
-    if NUM_THREAD is not None:
-        opts["num_thread"] = NUM_THREAD
-    if stop:
-        opts["stop"] = stop
-    return opts
-
-
-async def warm_model(model: str, num_ctx: int) -> None:
-    """Send a tiny request so Ollama loads the model into memory."""
-    try:
-        async with httpx.AsyncClient(timeout=600) as client:
-            await client.post(
-                f"{OLLAMA_API_URL}/api/generate",
-                json={
-                    "model": model,
-                    "prompt": "ok",
-                    "stream": False,
-                    "keep_alive": KEEP_ALIVE,
-                    "options": {"num_predict": 1, "num_ctx": num_ctx},
-                },
-            )
-        print(f"[warm] Model ready: {model}")
-    except Exception as exc:
-        print(f"[warm] Could not warm {model}: {exc}")
-
-
 @app.on_event("startup")
 async def startup_warmup() -> None:
     init_db()
-    # Don't block startup — warm in the background.
-    asyncio.create_task(warm_model(CHAT_MODEL_NAME, CHAT_NUM_CTX))
-    asyncio.create_task(warm_model(SQL_MODEL_NAME, SQL_NUM_CTX))
-    asyncio.create_task(warm_recent_schema_contexts())
+    asyncio.create_task(delayed_schema_warmup())
+
+async def delayed_schema_warmup():
+    await asyncio.sleep(5)  # Let model loading finish first
+    await warm_recent_schema_contexts()
 
 
 @app.get("/health")
@@ -824,6 +827,7 @@ async def health():
         "status": "ok",
         "chat_model": CHAT_MODEL_NAME,
         "sql_model": SQL_MODEL_NAME,
+        "ai_service_model": AI_SERVICE_MODEL,
     }
 
 # ---------------------------------------------------------------------------
@@ -974,45 +978,45 @@ def _keyword_intent(request: str) -> Optional[bool]:
     return None
 
 
-# async def classify_intent(client: httpx.AsyncClient, model: str,
-#                           last_sql: str, new_request: str) -> bool:
-#     """
-#     Ask the model whether new_request is a REFINEMENT of last_sql or a NEW query.
-#     Uses a tiny forced-choice prompt with num_predict=4 so it's very fast.
-#     Returns True if REFINE, False if NEW.
-#     """
-#     prompt = (
-#         "Decide if the new database request should REFINE the existing SQL or start as a NEW query.\n\n"
-#         f"Existing SQL: {last_sql}\n"
-#         f"New request: {new_request}\n\n"
-#         "Reply with exactly one word.\n"
-#         "- If the request adds/changes/removes something in the existing SQL → REFINE\n"
-#         "- If the request is about completely different data or a new unrelated question → NEW\n"
-#         "Answer:"
-#     )
-#     try:
-#         resp = await client.post(
-#             f"{OLLAMA_API_URL}/api/generate",
-#             json={
-#                 "model": model,
-#                 "prompt": prompt,
-#                 "stream": False,
-#                 "keep_alive": KEEP_ALIVE,
-#                 "options": {
-#                     "num_predict": 4,
-#                     "temperature": 0.0,
-#                     "num_ctx": 512,
-#                 },
-#             },
-#         )
-#         if resp.status_code == 200:
-#             answer = resp.json().get("response", "").strip().upper()
-#             print(f"[sql] intent classifier answer: {answer!r}")
-#             return "REFINE" in answer
-#     except Exception as exc:
-#         print(f"[sql] intent classifier failed: {exc}")
-#     # Default to fresh query on any error.
-#     return False
+async def classify_intent(client: httpx.AsyncClient, model: str,
+                          last_sql: str, new_request: str) -> bool:
+    """
+    Ask the model whether new_request is a REFINEMENT of last_sql or a NEW query.
+    Uses a tiny forced-choice prompt with num_predict=4 so it's very fast.
+    Returns True if REFINE, False if NEW.
+    """
+    prompt = (
+        "Decide if the new database request should REFINE the existing SQL or start as a NEW query.\n\n"
+        f"Existing SQL: {last_sql}\n"
+        f"New request: {new_request}\n\n"
+        "Reply with exactly one word.\n"
+        "- If the request adds/changes/removes something in the existing SQL → REFINE\n"
+        "- If the request is about completely different data or a new unrelated question → NEW\n"
+        "Answer:"
+    )
+    try:
+        resp = await post_ai_completion(
+            client,
+            build_chat_payload(
+                [
+                    {"role": "system", "content": "Reply with exactly one word: REFINE or NEW."},
+                    {"role": "user", "content": prompt},
+                ],
+                model,
+                stream=False,
+                temperature=0.0,
+                top_p=1.0,
+                max_tokens=4,
+            ),
+        )
+        if resp.status_code == 200:
+            answer = extract_ai_message_content(resp.json()).strip().upper()
+            print(f"[sql] intent classifier answer: {answer!r}")
+            return "REFINE" in answer
+    except Exception as exc:
+        print(f"[sql] intent classifier failed: {exc}")
+    # Default to fresh query on any error.
+    return False
 
 
 def extract_last_sql(messages: Optional[list[TextToSqlMessage]],
@@ -1053,8 +1057,8 @@ async def text_to_sql(
     request: TextToSqlRequest,
     _current_user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> TextToSqlResponse:
-    """Convert natural language query to SQL using the database schema"""
+):
+    """Convert natural language query to SQL using the database schema."""
     try:
         if not request.schemaId:
             raise HTTPException(status_code=400, detail="Schema is required")
@@ -1118,50 +1122,27 @@ async def text_to_sql(
             f"{task_block}"
         )
 
-        async def call_ollama(use_model: str):
-            return await client.post(
-                f"{OLLAMA_API_URL}/api/generate",
-                json={
-                    "model": use_model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "keep_alive": KEEP_ALIVE,
-                    "options": build_options(
-                        num_ctx=min(SQL_NUM_CTX, 1600),
-                        num_predict=180,
-                        temperature=max(0.0, min(SQL_TEMPERATURE, 0.3)),
-                        top_p=0.4,
-                        top_k=12,
-                        repeat_penalty=1.05,
-                        stop=["###", "REQUEST:", "Explanation:", "Note:", "```"],
-                        # No ';' stop — let model output the full statement;
-                        # extract_sql_from_response handles trimming.
-                        # No '\n\n' stop — code models often prefix with a blank line.
-                    ),
-                },
+        async with httpx.AsyncClient(timeout=AI_SERVICE_TIMEOUT_SECONDS) as client:
+            response = await post_ai_completion(
+                client,
+                build_chat_payload(
+                    [
+                        {"role": "system", "content": f"{SQL_SYSTEM_PROMPT}\n\n{SQL_RULES}"},
+                        {"role": "user", "content": prompt},
+                    ],
+                    model,
+                    temperature=max(0.0, min(SQL_TEMPERATURE, 0.3)),
+                ),
             )
-
-        async with httpx.AsyncClient(timeout=300) as client:
-            response = await call_ollama(model)
-
-            # Fallback: if the SQL model isn't installed, retry with the chat model.
-            if (
-                response.status_code == 404
-                and model != CHAT_MODEL_NAME
-                and "not found" in response.text.lower()
-            ):
-                print(f"[sql] Model '{model}' missing, falling back to '{CHAT_MODEL_NAME}'")
-                model = CHAT_MODEL_NAME
-                response = await call_ollama(model)
 
         if response.status_code != 200:
             raise HTTPException(
                 status_code=response.status_code,
-                detail=f"Ollama error: {response.text}"
+                detail=f"AI service error: {format_ai_error(response)}"
             )
 
         result = response.json()
-        raw_response = result.get("response", "").strip()
+        raw_response = extract_ai_message_content(result).strip()
         print(f"[sql] raw model response: {raw_response!r}")
         sql_query = extract_sql_from_response(raw_response)
         sql_query = ensure_sql_comments(sql_query, request.query)
@@ -1179,7 +1160,7 @@ async def text_to_sql(
     except httpx.ConnectError:
         raise HTTPException(
             status_code=503,
-            detail=f"Cannot connect to Ollama at {OLLAMA_API_URL}. Make sure it's running."
+            detail=f"Cannot connect to AI service at {AI_SERVICE_BASE_URL}."
         )
     except HTTPException:
         raise
@@ -1191,7 +1172,7 @@ async def chat(
     request: ChatRequest,
     _current_user: UserModel = Depends(get_current_user),
 ) -> ChatResponse:
-    """Chat endpoint that connects to Ollama"""
+    """Chat endpoint that calls the configured AI service"""
     try:
         model = request.model or CHAT_MODEL_NAME
 
@@ -1206,39 +1187,32 @@ async def chat(
 
         messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}] + history
 
-        async with httpx.AsyncClient(timeout=300) as client:
-            response = await client.post(
-                f"{OLLAMA_API_URL}/api/chat",
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "stream": False,
-                    "keep_alive": KEEP_ALIVE,
-                    "options": build_options(
-                        num_ctx=CHAT_NUM_CTX,
-                        num_predict=512,
-                        temperature=request.temperature or 0.7,
-                        top_p=request.top_p or 0.9,
-                    ),
-                },
+        async with httpx.AsyncClient(timeout=AI_SERVICE_TIMEOUT_SECONDS) as client:
+            response = await post_ai_completion(
+                client,
+                build_chat_payload(
+                    messages,
+                    model,
+                    temperature=request.temperature or 0.7,
+                ),
             )
 
         if response.status_code != 200:
             raise HTTPException(
                 status_code=response.status_code,
-                detail=f"Ollama error: {response.text}"
+                detail=f"AI service error: {format_ai_error(response)}"
             )
 
         result = response.json()
         return ChatResponse(
-            response=result.get("message", {}).get("content", ""),
+            response=extract_ai_message_content(result),
             model=model,
         )
 
     except httpx.ConnectError:
         raise HTTPException(
             status_code=503,
-            detail=f"Cannot connect to Ollama at {OLLAMA_API_URL}. Make sure it's running."
+            detail=f"Cannot connect to AI service at {AI_SERVICE_BASE_URL}."
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1263,43 +1237,48 @@ async def chat_stream(
     messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}] + history
 
     payload = {
-        "model": model,
-        "messages": messages,
-        "stream": True,
-        "keep_alive": KEEP_ALIVE,
-        "options": build_options(
-            num_ctx=CHAT_NUM_CTX,
-            num_predict=512,
+        **build_chat_payload(
+            messages,
+            model,
             temperature=request.temperature or 0.7,
-            top_p=request.top_p or 0.9,
-        ),
+            stream=True,
+        )
     }
 
     async def event_iter():
         try:
             async with httpx.AsyncClient(timeout=None) as client:
                 async with client.stream(
-                    "POST", f"{OLLAMA_API_URL}/api/chat", json=payload
+                    "POST", build_ai_completion_url(), headers=build_ai_headers(), json=payload, follow_redirects=True
                 ) as response:
                     if response.status_code != 200:
                         body = await response.aread()
-                        yield json.dumps({"error": body.decode("utf-8", "ignore")}) + "\n"
+                        error_text = body.decode("utf-8", "ignore").strip()
+                        if not error_text:
+                            location = response.headers.get("location")
+                            if location:
+                                error_text = f"redirected to {location}"
+                        if not error_text:
+                            error_text = "no response body"
+                        yield json.dumps({"error": f"{response.status_code} {response.reason_phrase}: {error_text}"}) + "\n"
                         return
                     async for line in response.aiter_lines():
                         if not line:
                             continue
+                        if line.startswith("data:"):
+                            line = line.removeprefix("data:").strip()
+                        if line == "[DONE]":
+                            yield json.dumps({"done": True}) + "\n"
+                            return
                         try:
                             obj = json.loads(line)
                         except json.JSONDecodeError:
                             continue
-                        delta = obj.get("message", {}).get("content", "")
+                        delta = extract_ai_message_content(obj)
                         if delta:
                             yield json.dumps({"delta": delta}) + "\n"
-                        if obj.get("done"):
-                            yield json.dumps({"done": True}) + "\n"
-                            return
         except httpx.ConnectError:
-            yield json.dumps({"error": f"Cannot connect to Ollama at {OLLAMA_API_URL}."}) + "\n"
+            yield json.dumps({"error": f"Cannot connect to AI service at {AI_SERVICE_BASE_URL}."}) + "\n"
         except Exception as exc:
             yield json.dumps({"error": str(exc)}) + "\n"
 

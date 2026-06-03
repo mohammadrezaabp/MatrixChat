@@ -1,20 +1,21 @@
 services:
-  ollama:
-    image: ollama/ollama:latest
-    container_name: matrix-ollama
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: matrix-frontend
     ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
+      - "3000:3000"
     environment:
-      - OLLAMA_HOST=0.0.0.0:11434
-      - OLLAMA_KEEP_ALIVE=60m
+      - NODE_ENV=development
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      backend:
+        condition: service_started
+    volumes:
+      - .:/app
+      - /app/node_modules
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 10s
-      timeout: 10s
-      retries: 20
 
   postgres:
     image: postgres:16-alpine
@@ -39,47 +40,29 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: matrix-backend
+    entrypoint: ["bash", "/app/entrypoint.sh"]
     ports:
       - "8000:8000"
     environment:
-      - OLLAMA_API_URL=http://ollama:11434
-      - CHAT_MODEL_NAME=llama3.2:1b
-      - SQL_MODEL_NAME=qwen2.5-coder:7b-instruct-q4_K_M
-      - OLLAMA_KEEP_ALIVE=60m
-      - CHAT_NUM_CTX=2048
-      - SQL_NUM_CTX=1536
-      - SQL_WARMUP_NUM_CTX=2048
-      - SQL_TEMPERATURE=0.1
-      - PULL_MODELS=true
-      - LOCAL_ONLY=false
+      - AI_SERVICE_BASE_URL=https://gpu1-llm.emofid.com/
+      - AI_SERVICE_API_KEY=sk-hUEEod0Jx1BhPwpaD209693b175c40689945122e6321Ff84
+      - AI_SERVICE_MODEL=DeepSeek-V4-Pro
+      - AI_SERVICE_COMPLETIONS_PATH=v1/chat/completions
+      - AI_SERVICE_MAX_RETRIES=3
+      - AI_SERVICE_INITIAL_RETRY_DELAY_SECONDS=2
+      - AI_SERVICE_TIMEOUT_SECONDS=120
+      - CHAT_MODEL_NAME=DeepSeek-V4-Pro
+      - SQL_MODEL_NAME=DeepSeek-V4-Pro
+      - LOCAL_ONLY=true
       - DATABASE_URL=postgresql://matrixchat:matrixchat@postgres:5432/matrixchat
       - AUTH_SECRET=change-this-secret-in-production
       - SESSION_TTL_SECONDS=604800
-      - CORS_ALLOW_ORIGINS=http://localhost:3000
     depends_on:
       postgres:
         condition: service_healthy
-      ollama:
-        condition: service_healthy
-    restart: unless-stopped
-
-  frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        NEXT_PUBLIC_API_URL: http://localhost:8000
-    container_name: matrix-frontend
-    ports:
-      - "3000:3000"
-    environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
-      - NODE_ENV=production
-    depends_on:
-      backend:
-        condition: service_started
+    volumes:
+      - ./backend:/app
     restart: unless-stopped
 
 volumes:
-  ollama_data:
   postgres_data:
