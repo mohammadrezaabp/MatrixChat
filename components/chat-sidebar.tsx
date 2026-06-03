@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { APP_VERSION } from '@/lib/version'
 
 export type Mode = 'chat' | 'sql'
 
@@ -443,8 +444,11 @@ export function ChatSidebar({
 
       {/* Desktop sidebar */}
       <aside className="hidden h-dvh w-72 shrink-0 flex-col border-r border-border/70 bg-card/40 p-4 backdrop-blur md:flex">
-        <div className="mb-4 px-1 text-center">
+        <div className="mb-4 flex items-center justify-center gap-2 px-1 text-center">
           <span className="text-lg font-semibold tracking-wide text-foreground">Construct</span>
+          <span className="rounded-full border border-border bg-background/70 px-2 py-0.5 text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
+            v{APP_VERSION}
+          </span>
         </div>
         {sidebarBody}
         {onLogout && (
@@ -494,7 +498,12 @@ export function ChatSidebar({
           <div className="absolute inset-0 bg-black/60" onClick={() => setOpen(false)} />
           <aside className="absolute left-0 top-0 flex h-full w-72 flex-col border-r border-border bg-card p-4 shadow-xl">
             <div className="mb-4 flex items-center justify-between px-1">
-              <span className="text-sm font-semibold tracking-wide text-foreground">Construct</span>
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold tracking-wide text-foreground">Construct</span>
+                <span className="rounded-full border border-border bg-background/70 px-2 py-0.5 text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
+                  v{APP_VERSION}
+                </span>
+              </div>
               <button
                 type="button"
                 onClick={() => setOpen(false)}
