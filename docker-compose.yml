@@ -66,6 +66,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://95.38.232.107:8000
     container_name: matrix-frontend
     ports:
       - "3000:3000"
