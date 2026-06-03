@@ -31,6 +31,7 @@ interface UserSchema {
   id: string
   title: string
   schema: string
+  faq: string
   updatedAt: number
 }
 
@@ -135,12 +136,12 @@ async function apiListSchemas(): Promise<UserSchema[]> {
   return res.json()
 }
 
-async function apiCreateSchema(title: string, schema: string): Promise<UserSchema> {
+async function apiCreateSchema(title: string, schema: string, faq: string): Promise<UserSchema> {
   const res = await fetch(`${API_URL}/schemas`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title, schema }),
+    body: JSON.stringify({ title, schema, faq }),
   })
   if (!res.ok) {
     const data = await res.json().catch(() => ({}))
@@ -149,12 +150,12 @@ async function apiCreateSchema(title: string, schema: string): Promise<UserSchem
   return res.json()
 }
 
-async function apiUpdateSchema(id: string, title: string, schema: string): Promise<UserSchema> {
+async function apiUpdateSchema(id: string, title: string, schema: string, faq: string): Promise<UserSchema> {
   const res = await fetch(`${API_URL}/schemas/${id}`, {
     method: 'PUT',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title, schema }),
+    body: JSON.stringify({ title, schema, faq }),
   })
   if (!res.ok) {
     const data = await res.json().catch(() => ({}))
@@ -182,18 +183,20 @@ export default function ChatPage() {
   const [sendingThreads, setSendingThreads] = useState<Record<string, boolean>>({})
   const [error, setError] = useState<string | null>(null)
   const [schemas, setSchemas] = useState<UserSchema[]>([])
-  const [selectedSchemaId, setSelectedSchemaId] = useState<string | null>(null)
   const [schemaTitle, setSchemaTitle] = useState('')
   const [schemaText, setSchemaText] = useState('')
+  const [schemaFaqText, setSchemaFaqText] = useState('')
   const [editingSchemaId, setEditingSchemaId] = useState<string | null>(null)
   const [schemaEditorOpen, setSchemaEditorOpen] = useState(false)
+  const [sqlThreadSchemaPickerOpen, setSqlThreadSchemaPickerOpen] = useState(false)
+  const [selectedSchemaForNewSqlThread, setSelectedSchemaForNewSqlThread] = useState<string | null>(null)
+  const [createSqlThreadOnSchemaSave, setCreateSqlThreadOnSchemaSave] = useState(false)
   const [isSavingSchema, setIsSavingSchema] = useState(false)
   const [profileEditorOpen, setProfileEditorOpen] = useState(false)
   const [profileUsername, setProfileUsername] = useState('')
   const [profileCurrentPassword, setProfileCurrentPassword] = useState('')
   const [profileNewPassword, setProfileNewPassword] = useState('')
   const [profileConfirmPassword, setProfileConfirmPassword] = useState('')
-  const [sqlSchemaMenuOpen, setSqlSchemaMenuOpen] = useState(false)
   const [isSavingProfile, setIsSavingProfile] = useState(false)
   const [hydrated, setHydrated] = useState(false)
   const [backendOnline, setBackendOnline] = useState(false)
@@ -237,12 +240,6 @@ export default function ChatPage() {
         const hasStoredActive =
           !!storedActiveId && loaded.some((thread) => thread.id === storedActiveId)
         setActiveId(hasStoredActive ? storedActiveId : null)
-        const schemaFromLatestSqlThread = [...loaded]
-          .sort((a, b) => b.updatedAt - a.updatedAt)
-          .find((thread) => thread.mode === 'sql' && thread.schemaId)?.schemaId || null
-
-        const restoredSchemaId = schemaFromLatestSqlThread || loadedSchemas[0]?.id || null
-        setSelectedSchemaId(restoredSchemaId)
       } catch {
         if (cancelled) return
         router.replace('/login')
@@ -309,24 +306,10 @@ export default function ChatPage() {
     return () => window.clearInterval(timer)
   }, [activeId])
 
-  useEffect(() => {
-    if (active?.mode === 'sql') {
-      setSelectedSchemaId(active.schemaId || null)
-    }
-  }, [active?.id, active?.mode, active?.schemaId])
-
   // Auto-scroll
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [active?.messages.length, active?.id])
-
-  // Onboarding: when entering SQL mode with no saved schema, open schema editor.
-  useEffect(() => {
-    if (!hydrated || !user) return
-    if (active?.mode === 'sql' && !active.schemaId) {
-      setSchemaEditorOpen(true)
-    }
-  }, [active?.id, active?.mode, active?.schemaId, hydrated, user])
 
   const updateActive = useCallback(
     (mut: (t: Thread) => Thread) => {
@@ -335,11 +318,43 @@ export default function ChatPage() {
     [activeId]
   )
 
-  const handleNewChat = (mode: Mode) => {
-    const t = newThread(mode)
-    if (mode === 'sql') {
-      t.schemaId = selectedSchemaId
+  const startSqlThreadWithSchema = useCallback((schemaId: string) => {
+    const t = newThread('sql')
+    t.schemaId = schemaId
+    setThreads(prev => [t, ...prev])
+    setActiveId(t.id)
+    setSqlThreadSchemaPickerOpen(false)
+    setCreateSqlThreadOnSchemaSave(false)
+    setError(null)
+  }, [])
+
+  useEffect(() => {
+    if (!sqlThreadSchemaPickerOpen) return
+    if (schemas.length === 0) {
+      setSelectedSchemaForNewSqlThread(null)
+      return
     }
+    const isSelectedValid = !!selectedSchemaForNewSqlThread && schemas.some((s) => s.id === selectedSchemaForNewSqlThread)
+    if (!isSelectedValid) {
+      setSelectedSchemaForNewSqlThread(schemas[0].id)
+    }
+  }, [sqlThreadSchemaPickerOpen, schemas, selectedSchemaForNewSqlThread])
+
+  const handleNewChat = (mode: Mode) => {
+    if (mode === 'sql') {
+      if (schemas.length === 0) {
+        setCreateSqlThreadOnSchemaSave(true)
+        setSqlThreadSchemaPickerOpen(false)
+        handleCreateSchema()
+        return
+      }
+      setSelectedSchemaForNewSqlThread(schemas[0].id)
+      setSqlThreadSchemaPickerOpen(true)
+      setError(null)
+      return
+    }
+
+    const t = newThread(mode)
     setThreads(prev => [t, ...prev])
     setActiveId(t.id)
     setError(null)
@@ -384,7 +399,6 @@ export default function ChatPage() {
     title: s.title,
     updatedAt: s.updatedAt,
   }))
-  const selectedSchemaTitle = schemaSummaries.find((schema) => schema.id === selectedSchemaId)?.title || null
 
   const handleSendMessage = async (userMessage: string) => {
     if (!active) {
@@ -526,8 +540,8 @@ export default function ChatPage() {
   const handleTextToSql = async (userMessage: string) => {
     if (!active) return
     if (!active.schemaId) {
-      setSchemaEditorOpen(true)
-      setError('Select a schema for this SQL conversation first.')
+      setSqlThreadSchemaPickerOpen(true)
+      setError('This SQL thread has no schema. Start a new SQL thread and choose a schema.')
       return
     }
 
@@ -606,26 +620,11 @@ export default function ChatPage() {
     }
   }
 
-  const handleSelectDefaultSchema = (schemaId: string) => {
-    setSelectedSchemaId(schemaId)
-    setSchemaEditorOpen(false)
-    setError(null)
-  }
-
-  const handleSelectSchemaForActiveThread = (schemaId: string) => {
-    setSelectedSchemaId(schemaId)
-    setSchemaEditorOpen(false)
-    setError(null)
-
-    if (active && active.mode === 'sql') {
-      updateActive(t => ({ ...t, schemaId, updatedAt: nextUpdatedAt(t.updatedAt) }))
-    }
-  }
-
   const handleCreateSchema = () => {
     setEditingSchemaId(null)
     setSchemaTitle('')
     setSchemaText('')
+    setSchemaFaqText('')
     setSchemaEditorOpen(true)
     setError(null)
   }
@@ -636,6 +635,7 @@ export default function ChatPage() {
     setEditingSchemaId(found.id)
     setSchemaTitle(found.title)
     setSchemaText(found.schema)
+    setSchemaFaqText(found.faq || '')
     setSchemaEditorOpen(true)
     setError(null)
   }
@@ -644,12 +644,11 @@ export default function ChatPage() {
     try {
       await apiDeleteSchema(schemaId)
       setSchemas(prev => prev.filter(s => s.id !== schemaId))
-      setThreads(prev => prev.map(t => (t.schemaId === schemaId ? { ...t, schemaId: null } : t)))
-      if (selectedSchemaId === schemaId) setSelectedSchemaId(null)
       if (editingSchemaId === schemaId) {
         setEditingSchemaId(null)
         setSchemaTitle('')
         setSchemaText('')
+        setSchemaFaqText('')
         setSchemaEditorOpen(false)
       }
     } catch (err) {
@@ -659,12 +658,13 @@ export default function ChatPage() {
 
   const handleSaveSchema = async () => {
     const title = schemaTitle.trim()
-    const trimmed = schemaText.trim()
+    const schemaBody = schemaText.trim()
+    const faqBody = schemaFaqText.trim()
     if (title.length < 2) {
       setError('Schema title must be at least 2 characters.')
       return
     }
-    if (!trimmed) {
+    if (!schemaBody) {
       setError('Schema cannot be empty.')
       return
     }
@@ -673,22 +673,24 @@ export default function ChatPage() {
     setError(null)
     try {
       const saved = editingSchemaId
-        ? await apiUpdateSchema(editingSchemaId, title, trimmed)
-        : await apiCreateSchema(title, trimmed)
+        ? await apiUpdateSchema(editingSchemaId, title, schemaBody, faqBody)
+        : await apiCreateSchema(title, schemaBody, faqBody)
 
       setSchemas(prev => {
         const without = prev.filter(s => s.id !== saved.id)
         return [saved, ...without]
       })
-      setSelectedSchemaId(saved.id)
-      if (active?.mode === 'sql') {
-        updateActive(t => ({ ...t, schemaId: saved.id, updatedAt: nextUpdatedAt(t.updatedAt) }))
+
+      if (createSqlThreadOnSchemaSave) {
+        startSqlThreadWithSchema(saved.id)
       }
 
       setEditingSchemaId(saved.id)
       setSchemaTitle(saved.title)
       setSchemaText(saved.schema)
+      setSchemaFaqText(saved.faq || '')
       setSchemaEditorOpen(false)
+      setCreateSqlThreadOnSchemaSave(false)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save schema')
     } finally {
@@ -825,7 +827,6 @@ export default function ChatPage() {
         threads={summaries}
         schemas={schemaSummaries}
         username={user?.username}
-        selectedSchemaId={selectedSchemaId}
         activeId={activeId}
         onSelect={(id) => {
           setActiveId(id)
@@ -833,7 +834,6 @@ export default function ChatPage() {
         }}
         onNewChat={handleNewChat}
         onDelete={handleDelete}
-        onSelectSchema={handleSelectDefaultSchema}
         onCreateSchema={handleCreateSchema}
         onEditSchema={handleEditSchema}
         onDeleteSchema={handleDeleteSchema}
@@ -844,77 +844,18 @@ export default function ChatPage() {
       <div className="flex flex-1 flex-col min-w-0">
         <div className="mx-auto flex w-full max-w-5xl flex-1 min-h-0 flex-col px-4 py-6 sm:px-6 lg:px-8">
           {active && (
-            <div className="mb-4 flex items-center justify-end gap-2">
+            <div className="mb-4 flex items-center justify-between gap-2">
               {active.mode === 'sql' && (
-                <>
-                  {!active.schemaId && (
-                    <span className="rounded-full border border-amber-500/50 bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">
-                      Schema required
-                    </span>
-                  )}
-                  <div className="relative">
-                    <button
-                      type="button"
-                      onClick={() => setSqlSchemaMenuOpen(v => !v)}
-                      className="inline-flex items-center gap-2 rounded-full border border-border bg-background/50 px-3 py-1.5 text-xs font-medium text-foreground transition-all hover:border-primary"
-                    >
-                      <span className="max-w-48 truncate">{active.schemaId ? (schemaSummaries.find((schema) => schema.id === active.schemaId)?.title || 'Select schema...') : (selectedSchemaTitle || 'Select schema...')}</span>
-                      <svg
-                        width="12"
-                        height="12"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        aria-hidden
-                        className={`transition-transform ${sqlSchemaMenuOpen ? 'rotate-180' : ''}`}
-                      >
-                        <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                    </button>
-                    {sqlSchemaMenuOpen && (
-                      <div className="absolute right-0 top-full z-20 mt-1 min-w-56 overflow-hidden rounded-xl border border-border bg-card shadow-lg">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            handleCreateSchema()
-                            setSqlSchemaMenuOpen(false)
-                          }}
-                          className="block w-full px-3 py-2 text-left text-xs font-medium text-foreground hover:bg-background/60"
-                        >
-                          + Add new schema
-                        </button>
-                        <div className="max-h-60 overflow-y-auto">
-                          {schemaSummaries.length === 0 ? (
-                            <p className="px-3 py-2 text-xs text-muted-foreground">No schemas yet.</p>
-                          ) : (
-                            schemaSummaries.map((schema) => {
-                              const isActiveSchema = active.schemaId === schema.id
-                              return (
-                                <button
-                                  key={schema.id}
-                                  type="button"
-                                  onClick={() => {
-                                    handleSelectSchemaForActiveThread(schema.id)
-                                    setSqlSchemaMenuOpen(false)
-                                  }}
-                                  className={`block w-full px-3 py-2 text-left text-xs transition-colors hover:bg-background/60 ${isActiveSchema ? 'bg-primary/10 text-foreground' : 'text-muted-foreground'}`}
-                                >
-                                  {schema.title}
-                                </button>
-                              )
-                            })
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </>
+                <span className="rounded-full border border-border bg-background/50 px-3 py-1.5 text-xs font-medium text-foreground">
+                  Schema: {schemaSummaries.find((schema) => schema.id === active.schemaId)?.title || 'Unknown schema'}
+                </span>
               )}
               <button
                 type="button"
                 onClick={handleCloseActive}
                 className="inline-flex items-center gap-1 rounded-full border border-border bg-background/50 px-3 py-1.5 text-xs font-medium text-foreground transition-all hover:border-primary"
               >
-                Close
+                X
               </button>
             </div>
           )}
@@ -990,12 +931,94 @@ export default function ChatPage() {
         </div>
       </div>
 
+      {sqlThreadSchemaPickerOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <button
+            type="button"
+            aria-label="Close schema picker"
+            onClick={() => {
+              setSqlThreadSchemaPickerOpen(false)
+              setCreateSqlThreadOnSchemaSave(false)
+            }}
+            className="absolute inset-0 bg-black/60"
+          />
+          <div className="relative z-10 w-full max-w-lg rounded-2xl border border-border bg-card p-4 shadow-2xl sm:p-5">
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-medium">Choose Schema</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  A Text to SQL thread is permanently bound to one schema.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSqlThreadSchemaPickerOpen(false)
+                  setCreateSqlThreadOnSchemaSave(false)
+                }}
+                className="rounded-md border border-border bg-background/40 px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              {schemaSummaries.length === 0 ? (
+                <p className="rounded-xl border border-dashed border-border/70 px-3 py-4 text-xs text-muted-foreground">
+                  No schemas yet. Add one to start a SQL thread.
+                </p>
+              ) : (
+                <select
+                  value={selectedSchemaForNewSqlThread || ''}
+                  onChange={(e) => setSelectedSchemaForNewSqlThread(e.target.value || null)}
+                  className="w-full rounded-xl border border-border bg-background/60 px-3 py-2 text-sm text-foreground outline-none focus:border-primary"
+                >
+                  {schemaSummaries.map((schema) => (
+                    <option key={schema.id} value={schema.id}>
+                      {schema.title}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (!selectedSchemaForNewSqlThread) return
+                  startSqlThreadWithSchema(selectedSchemaForNewSqlThread)
+                }}
+                disabled={!selectedSchemaForNewSqlThread}
+                className="rounded-xl border border-primary bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                Create Text to SQL Thread
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setCreateSqlThreadOnSchemaSave(true)
+                  setSqlThreadSchemaPickerOpen(false)
+                  handleCreateSchema()
+                }}
+                className="rounded-xl border border-primary bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground"
+              >
+                Add New Schema
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {schemaEditorOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <button
             type="button"
             aria-label="Close schema editor"
-            onClick={() => setSchemaEditorOpen(false)}
+            onClick={() => {
+              setSchemaEditorOpen(false)
+              setCreateSqlThreadOnSchemaSave(false)
+            }}
             className="absolute inset-0 bg-black/60"
           />
           <div className="relative z-10 flex h-[78vh] min-h-[460px] w-[92vw] min-w-[320px] max-w-4xl max-h-[90vh] resize flex-col overflow-hidden rounded-2xl border border-border bg-card p-4 shadow-2xl sm:p-5">
@@ -1005,7 +1028,7 @@ export default function ChatPage() {
                   {editingSchemaId ? 'Edit SQL Schema' : 'Add SQL Schema'}
                 </p>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Schemas are stored per account. Add a title and paste CREATE TABLE statements.
+                  Schemas are stored per account. Add a title, paste CREATE TABLE statements, and optional FAQ notes.
                 </p>
                 <p className="mt-1 text-[11px] text-muted-foreground/80">
                   Tip: drag the bottom-right corner to resize this editor.
@@ -1013,7 +1036,10 @@ export default function ChatPage() {
               </div>
               <button
                 type="button"
-                onClick={() => setSchemaEditorOpen(false)}
+                onClick={() => {
+                  setSchemaEditorOpen(false)
+                  setCreateSqlThreadOnSchemaSave(false)
+                }}
                 className="rounded-md border border-border bg-background/40 px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
               >
                 Close
@@ -1073,6 +1099,19 @@ export default function ChatPage() {
               </div>
             </div>
 
+            <div className="mt-3">
+              <label className="mb-1 block text-xs font-medium text-muted-foreground">Schema FAQ (Markdown)</label>
+              <textarea
+                value={schemaFaqText}
+                onChange={(e) => setSchemaFaqText(e.target.value)}
+                className="matrix-scrollbar h-28 w-full resize-y rounded-xl border border-border bg-background/60 px-3 py-2 text-xs leading-5 outline-none focus:border-primary"
+                placeholder={
+                  'Example:\n- customers.status: active | inactive\n- orders.total_amount is in USD\n- Use created_at for time filtering'
+                }
+                spellCheck={false}
+              />
+            </div>
+
             <div className="mt-3 flex items-center gap-2">
               <button
                 type="button"
@@ -1084,7 +1123,10 @@ export default function ChatPage() {
               </button>
               <button
                 type="button"
-                onClick={() => setSchemaEditorOpen(false)}
+                onClick={() => {
+                  setSchemaEditorOpen(false)
+                  setCreateSqlThreadOnSchemaSave(false)
+                }}
                 className="rounded-xl border border-border bg-background/40 px-3 py-1.5 text-xs text-muted-foreground"
               >
                 Cancel

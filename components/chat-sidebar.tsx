@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { APP_VERSION } from '@/lib/version'
 
 export type Mode = 'chat' | 'sql'
@@ -24,12 +24,10 @@ interface ChatSidebarProps {
   schemas: SchemaSummary[]
   username?: string | null
   onEditProfile?: () => void
-  selectedSchemaId: string | null
   activeId: string | null
   onSelect: (id: string) => void
   onNewChat: (mode: Mode) => void
   onDelete: (id: string) => void
-  onSelectSchema: (id: string) => void
   onCreateSchema: () => void
   onEditSchema: (id: string) => void
   onDeleteSchema: (id: string) => void
@@ -52,12 +50,10 @@ export function ChatSidebar({
   threads,
   schemas,
   username,
-  selectedSchemaId,
   activeId,
   onSelect,
   onNewChat,
   onDelete,
-  onSelectSchema,
   onCreateSchema,
   onEditSchema,
   onDeleteSchema,
@@ -74,10 +70,11 @@ export function ChatSidebar({
   const [sqlExpanded, setSqlExpanded] = useState(false)
   const [profileMenuOpen, setProfileMenuOpen] = useState(false)
 
-  const sorted = [...threads].sort((a, b) => b.updatedAt - a.updatedAt)
-  const chatThreads = sorted.filter(t => t.mode === 'chat')
-  const sqlThreads = sorted.filter(t => t.mode === 'sql')
-  const sortedSchemas = [...schemas].sort((a, b) => b.updatedAt - a.updatedAt)
+  const sorted = useMemo(() => [...threads].sort((a, b) => b.updatedAt - a.updatedAt), [threads])
+  const chatThreads = useMemo(() => sorted.filter(t => t.mode === 'chat'), [sorted])
+  const sqlThreads = useMemo(() => sorted.filter(t => t.mode === 'sql'), [sorted])
+  const sortedSchemas = useMemo(() => [...schemas].sort((a, b) => b.updatedAt - a.updatedAt), [schemas])
+  const schemaTitleById = new Map(sortedSchemas.map((schema) => [schema.id, schema.title]))
 
   const visibleSchemas = sortedSchemas.slice(0, 3)
   const extraSchemas = sortedSchemas.slice(3)
@@ -132,6 +129,11 @@ export function ChatSidebar({
           <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
             {t.mode === 'sql' ? 'SQL' : 'Chat'} · {formatRelative(t.updatedAt)}
           </span>
+          {t.mode === 'sql' && (
+            <span className="text-[10px] uppercase tracking-wider text-muted-foreground/80">
+              Schema: {t.schemaId ? (schemaTitleById.get(t.schemaId) || 'Unknown') : 'Unknown'}
+            </span>
+          )}
         </button>
         <button
           type="button"
@@ -153,25 +155,14 @@ export function ChatSidebar({
   const renderSchemaItem = (s: SchemaSummary) => (
     <li key={s.id}>
       <div
-        className={`group relative flex items-center gap-2 rounded-xl border px-3 py-2 text-sm transition-all ${
-          selectedSchemaId === s.id
-            ? 'border-primary/80 bg-primary/10 text-foreground shadow-sm shadow-primary/20'
-            : 'border-border/60 bg-background/50 text-foreground hover:border-border hover:bg-card/80'
-        }`}
+        className="group relative flex items-center gap-2 rounded-xl border border-border/60 bg-background/50 px-3 py-2 text-sm text-foreground transition-all hover:border-border hover:bg-card/80"
       >
-        <button
-          type="button"
-          onClick={() => {
-            onSelectSchema(s.id)
-            setOpen(false)
-          }}
-          className="flex flex-1 flex-col items-start text-left"
-        >
+        <div className="flex flex-1 flex-col items-start text-left">
           <span className="line-clamp-1 w-full">{s.title}</span>
           <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
             {formatRelative(s.updatedAt)}
           </span>
-        </button>
+        </div>
         <button
           type="button"
           onClick={(e) => {
@@ -447,7 +438,7 @@ export function ChatSidebar({
         <div className="mb-4 flex items-center justify-center gap-2 px-1 text-center">
           <span className="text-lg font-semibold tracking-wide text-foreground">Construct</span>
           <span className="rounded-full border border-border bg-background/70 px-2 py-0.5 text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
-            v{APP_VERSION}
+            V{APP_VERSION}
           </span>
         </div>
         {sidebarBody}

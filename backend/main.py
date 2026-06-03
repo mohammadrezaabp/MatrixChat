@@ -54,6 +54,7 @@ class SqlSchemaModel(Base):
     user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     title = Column(String, nullable=False)
     schema_text = Column(Text, nullable=False)
+    schema_faq = Column(Text, nullable=False, default="")
     updated_at = Column(BigInteger, nullable=False)
     user = relationship("UserModel", back_populates="schemas")
     threads = relationship("ThreadModel", back_populates="schema")
@@ -72,6 +73,9 @@ class ThreadModel(Base):
     messages  = relationship("MessageModel", back_populates="thread",
                              cascade="all, delete-orphan",
                              order_by="MessageModel.position")
+    prompts   = relationship("PromptModel", back_populates="thread",
+                             cascade="all, delete-orphan",
+                             order_by="PromptModel.created_at")
 
 
 class MessageModel(Base):
@@ -84,6 +88,16 @@ class MessageModel(Base):
     is_sql     = Column(Boolean, nullable=False, default=False)
     position   = Column(Integer, nullable=False, default=0)  # ordering within thread
     thread     = relationship("ThreadModel", back_populates="messages")
+
+
+class PromptModel(Base):
+    __tablename__ = "prompts"
+    id          = Column(String, primary_key=True)
+    thread_id   = Column(String, ForeignKey("threads.id", ondelete="CASCADE"), nullable=False, index=True)
+    message_id  = Column(String, nullable=False, index=True)
+    prompt_text = Column(Text, nullable=False, default="")
+    created_at  = Column(BigInteger, nullable=False)
+    thread      = relationship("ThreadModel", back_populates="prompts")
 
 
 def get_db():
@@ -101,6 +115,7 @@ def init_db():
         Base.metadata.create_all(bind=engine)
         ensure_auth_schema()
         ensure_thread_schema_column()
+        ensure_schema_faq_column()
         print("[db] tables ready")
     else:
         print("[db] DATABASE_URL not set, skipping DB init")
@@ -247,6 +262,7 @@ class TextToSqlResponse(BaseModel):
     sql: str
     query: str
     model: str
+    prompt: Optional[str] = None
 
 # ---------------------------------------------------------------------------
 # Thread / Message API Pydantic schemas
@@ -256,6 +272,7 @@ class MessageSchema(BaseModel):
     role: str
     content: str
     isSql: bool = False
+    prompt: Optional[str] = None
 
 class ThreadSchema(BaseModel):
     id: str
@@ -272,12 +289,14 @@ class UpsertThreadRequest(BaseModel):
 class UserSchemaRequest(BaseModel):
     title: str
     schema: str
+    faq: Optional[str] = ""
 
 
 class UserSchemaResponse(BaseModel):
     id: str
     title: str
     schema: str
+    faq: str
     updatedAt: int
 
 
@@ -403,6 +422,19 @@ def ensure_thread_schema_column() -> None:
         return
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE threads ADD COLUMN schema_id VARCHAR NULL"))
+
+
+def ensure_schema_faq_column() -> None:
+    if engine is None:
+        return
+    insp = inspect(engine)
+    if not insp.has_table("sql_schemas"):
+        return
+    schema_columns = {col["name"] for col in insp.get_columns("sql_schemas")}
+    if "schema_faq" in schema_columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE sql_schemas ADD COLUMN schema_faq TEXT NOT NULL DEFAULT ''"))
 
 
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> UserModel:
@@ -653,6 +685,7 @@ def _schema_to_response(item: SqlSchemaModel) -> UserSchemaResponse:
         id=item.id,
         title=item.title,
         schema=item.schema_text,
+        faq=item.schema_faq or "",
         updatedAt=item.updated_at,
     )
 
@@ -680,6 +713,7 @@ def create_user_schema(
 ):
     title = body.title.strip()
     cleaned = body.schema.strip()
+    faq = (body.faq or "").strip()
     if len(title) < 2:
         raise HTTPException(status_code=400, detail="Title is too short")
     if len(cleaned) < 20:
@@ -690,6 +724,7 @@ def create_user_schema(
         user_id=current_user.id,
         title=title,
         schema_text=cleaned,
+        schema_faq=faq,
         updated_at=int(datetime.now(timezone.utc).timestamp() * 1000),
     )
     db.add(item)
@@ -717,6 +752,7 @@ def update_user_schema(
 
     title = body.title.strip()
     cleaned = body.schema.strip()
+    faq = (body.faq or "").strip()
     if len(title) < 2:
         raise HTTPException(status_code=400, detail="Title is too short")
     if len(cleaned) < 20:
@@ -724,6 +760,7 @@ def update_user_schema(
 
     item.title = title
     item.schema_text = cleaned
+    item.schema_faq = faq
     item.updated_at = int(datetime.now(timezone.utc).timestamp() * 1000)
     db.commit()
     remove_schema_cache(item.id)
@@ -745,7 +782,20 @@ def delete_user_schema(
     )
     if item is None:
         raise HTTPException(status_code=404, detail="Schema not found")
-    db.query(ThreadModel).filter(ThreadModel.schema_id == schema_id).update({"schema_id": None})
+    in_use_count = (
+        db.query(ThreadModel)
+        .filter(
+            ThreadModel.user_id == current_user.id,
+            ThreadModel.mode == "sql",
+            ThreadModel.schema_id == schema_id,
+        )
+        .count()
+    )
+    if in_use_count > 0:
+        raise HTTPException(
+            status_code=409,
+            detail="Schema is used by one or more SQL threads and cannot be deleted",
+        )
     db.delete(item)
     db.commit()
     remove_schema_cache(schema_id)
@@ -835,6 +885,11 @@ async def health():
 # ---------------------------------------------------------------------------
 
 def _thread_to_schema(t: ThreadModel) -> ThreadSchema:
+    prompt_by_message_id: dict[str, str] = {}
+    for p in t.prompts:
+        if p.message_id not in prompt_by_message_id:
+            prompt_by_message_id[p.message_id] = p.prompt_text
+
     return ThreadSchema(
         id=t.id,
         title=t.title,
@@ -842,7 +897,13 @@ def _thread_to_schema(t: ThreadModel) -> ThreadSchema:
         schemaId=t.schema_id,
         updatedAt=t.updated_at,
         messages=[
-            MessageSchema(id=m.id, role=m.role, content=m.content, isSql=m.is_sql)
+            MessageSchema(
+                id=m.id,
+                role=m.role,
+                content=m.content,
+                isSql=m.is_sql,
+                prompt=prompt_by_message_id.get(m.id),
+            )
             for m in t.messages
         ],
     )
@@ -892,6 +953,8 @@ def upsert_thread(thread_id: str, body: UpsertThreadRequest,
         raise HTTPException(status_code=400, detail="Thread id mismatch")
 
     schema_id = data.schemaId if data.mode == "sql" else None
+    if data.mode == "sql" and not schema_id:
+        raise HTTPException(status_code=400, detail="SQL threads require a schema")
     if schema_id is not None:
         schema_exists = (
             db.query(SqlSchemaModel)
@@ -900,6 +963,9 @@ def upsert_thread(thread_id: str, body: UpsertThreadRequest,
         )
         if schema_exists is None:
             raise HTTPException(status_code=400, detail="Invalid schema id")
+
+    if t is not None and t.mode == "sql" and t.schema_id is not None and schema_id != t.schema_id:
+        raise HTTPException(status_code=400, detail="Schema cannot be changed for an existing SQL thread")
 
     def apply_messages() -> None:
         for pos, msg in enumerate(data.messages):
@@ -911,6 +977,14 @@ def upsert_thread(thread_id: str, body: UpsertThreadRequest,
                 is_sql=msg.isSql,
                 position=pos,
             ))
+            if msg.prompt:
+                db.add(PromptModel(
+                    id=secrets.token_urlsafe(12),
+                    thread_id=data.id,
+                    message_id=msg.id,
+                    prompt_text=msg.prompt,
+                    created_at=int(datetime.now(timezone.utc).timestamp() * 1000),
+                ))
 
     if t is None:
         existing_other = db.query(ThreadModel).filter(ThreadModel.id == thread_id).first()
@@ -938,6 +1012,7 @@ def upsert_thread(thread_id: str, body: UpsertThreadRequest,
             t.schema_id = schema_id
             t.updated_at = data.updatedAt
             db.query(MessageModel).filter(MessageModel.thread_id == thread_id).delete()
+            db.query(PromptModel).filter(PromptModel.thread_id == thread_id).delete()
             apply_messages()
             db.commit()
     else:
@@ -947,6 +1022,7 @@ def upsert_thread(thread_id: str, body: UpsertThreadRequest,
         t.updated_at = data.updatedAt
         # Delete existing messages; we replace them wholesale.
         db.query(MessageModel).filter(MessageModel.thread_id == thread_id).delete()
+        db.query(PromptModel).filter(PromptModel.thread_id == thread_id).delete()
         apply_messages()
         db.commit()
 
@@ -1075,6 +1151,7 @@ async def text_to_sql(
             raise HTTPException(status_code=400, detail="Schema not found")
 
         schema_summary = get_schema_summary_cached(user_schema.id, user_schema.schema_text)
+        schema_faq = (user_schema.schema_faq or "").strip()
         model = request.model or SQL_MODEL_NAME
         last_sql = extract_last_sql(request.messages, request.query)
         is_enhancement = _is_enhancement_request(request.query)
@@ -1113,6 +1190,7 @@ async def text_to_sql(
         prompt = (
             f"{SQL_SYSTEM_PROMPT}\n\n"
             f"SCHEMA (table: columns):\n{schema_summary}\n\n"
+            f"SCHEMA FAQ (markdown):\n{schema_faq or 'N/A'}\n\n"
             f"{SQL_RULES}\n\n"
             "### Example\n"
             "REQUEST: list top 10 recent orders\n"
@@ -1155,6 +1233,7 @@ async def text_to_sql(
             sql=sql_query,
             query=request.query,
             model=model,
+            prompt=prompt,
         )
 
     except httpx.ConnectError:
