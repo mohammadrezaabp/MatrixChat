@@ -107,10 +107,16 @@ def init_db():
 
 app = FastAPI()
 
-# Enable CORS for Next.js frontend
+# CORS with credentials cannot use wildcard origins.
+raw_cors_origins = os.getenv(
+    "CORS_ALLOW_ORIGINS",
+    "http://localhost:3000,http://127.0.0.1:3000",
+)
+CORS_ALLOW_ORIGINS = [o.strip() for o in raw_cors_origins.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ALLOW_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
