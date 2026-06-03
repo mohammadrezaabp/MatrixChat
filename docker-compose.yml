@@ -47,7 +47,7 @@ services:
       - SQL_MODEL_NAME=qwen2.5-coder:7b-instruct-q4_K_M
       - OLLAMA_KEEP_ALIVE=60m
       - CHAT_NUM_CTX=2048
-      - SQL_NUM_CTX=4096
+      - SQL_NUM_CTX=1536
       - SQL_WARMUP_NUM_CTX=2048
       - SQL_TEMPERATURE=0.1
       - PULL_MODELS=true
