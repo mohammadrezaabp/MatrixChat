@@ -42,6 +42,10 @@ function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
 }
 
+function nextUpdatedAt(previous: number) {
+  return Math.max(Date.now(), previous + 1)
+}
+
 function greeting(mode: Mode): Message {
   return {
     id: uid(),
@@ -175,7 +179,7 @@ export default function ChatPage() {
   const [threads, setThreads] = useState<Thread[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [user, setUser] = useState<AuthUser | null>(null)
-  const [isLoading, setIsLoading] = useState(false)
+  const [sendingThreads, setSendingThreads] = useState<Record<string, boolean>>({})
   const [error, setError] = useState<string | null>(null)
   const [schemas, setSchemas] = useState<UserSchema[]>([])
   const [selectedSchemaId, setSelectedSchemaId] = useState<string | null>(null)
@@ -284,6 +288,7 @@ export default function ChatPage() {
   }, [threads, hydrated, backendOnline, markBackendOffline])
 
   const active = threads.find(t => t.id === activeId) || null
+  const activeThreadIsSending = !!active && !!sendingThreads[active.id]
 
   useEffect(() => {
     if (activeId) {
@@ -338,11 +343,6 @@ export default function ChatPage() {
     setThreads(prev => [t, ...prev])
     setActiveId(t.id)
     setError(null)
-    if (backendOnline) {
-      apiSaveThread(t).catch(() => {
-        markBackendOffline()
-      })
-    }
   }
 
   const handleDelete = (id: string) => {
@@ -351,6 +351,12 @@ export default function ChatPage() {
         markBackendOffline()
       })
     }
+    setSendingThreads(prev => {
+      if (!prev[id]) return prev
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
     setThreads(prev => {
       const next = prev.filter(t => t.id !== id)
       if (id === activeId) {
@@ -386,11 +392,6 @@ export default function ChatPage() {
       setThreads(prev => [starter, ...prev])
       setActiveId(starter.id)
       setError(null)
-      if (backendOnline) {
-        apiSaveThread(starter).catch(() => {
-          markBackendOffline()
-        })
-      }
       await handleChatStream(userMessage, starter)
       return
     }
@@ -402,13 +403,28 @@ export default function ChatPage() {
     }
   }
 
+  const setThreadSending = useCallback((threadId: string, sending: boolean) => {
+    setSendingThreads(prev => {
+      if (sending) {
+        if (prev[threadId]) return prev
+        return { ...prev, [threadId]: true }
+      }
+
+      if (!prev[threadId]) return prev
+      const next = { ...prev }
+      delete next[threadId]
+      return next
+    })
+  }, [])
+
   const handleChatStream = async (userMessage: string, threadOverride?: Thread) => {
     const targetThread = threadOverride || active
     if (!targetThread) return
     setError(null)
-    setIsLoading(true)
 
     const activeThreadId = targetThread.id
+    if (sendingThreads[activeThreadId]) return
+    setThreadSending(activeThreadId, true)
     const userMsg: Message = { id: uid(), role: 'user', content: userMessage }
     const assistantId = uid()
     const assistantMsg: Message = { id: assistantId, role: 'assistant', content: '' }
@@ -427,7 +443,7 @@ export default function ChatPage() {
               ...t,
               title: isFirstUserMessage ? deriveTitle(userMessage) : t.title,
               messages: [...t.messages, userMsg, assistantMsg],
-              updatedAt: Date.now(),
+              updatedAt: nextUpdatedAt(t.updatedAt),
             }
           : t
       )
@@ -442,7 +458,7 @@ export default function ChatPage() {
                 messages: t.messages.map(m =>
                   m.id === assistantId ? { ...m, content } : m
                 ),
-                updatedAt: Date.now(),
+                updatedAt: nextUpdatedAt(t.updatedAt),
               }
             : t
         )
@@ -503,7 +519,7 @@ export default function ChatPage() {
         `[Error]\n${errorMessage}\n\nMake sure the Python service is running on port 8000 and Ollama is available.`
       )
     } finally {
-      setIsLoading(false)
+      setThreadSending(activeThreadId, false)
     }
   }
 
@@ -516,9 +532,10 @@ export default function ChatPage() {
     }
 
     setError(null)
-    setIsLoading(true)
 
     const activeThreadId = active.id
+  if (sendingThreads[activeThreadId]) return
+  setThreadSending(activeThreadId, true)
     const userMsg: Message = { id: uid(), role: 'user', content: userMessage }
     const assistantId = uid()
     const assistantMsg: Message = {
@@ -533,7 +550,7 @@ export default function ChatPage() {
       ...t,
       title: isFirstUserMessage ? deriveTitle(userMessage) : t.title,
       messages: [...t.messages, userMsg, assistantMsg],
-      updatedAt: Date.now(),
+      updatedAt: nextUpdatedAt(t.updatedAt),
     }))
 
     const patchAssistant = (patch: Partial<Message>) => {
@@ -545,7 +562,7 @@ export default function ChatPage() {
                 messages: t.messages.map(m =>
                   m.id === assistantId ? { ...m, ...patch } : m
                 ),
-                updatedAt: Date.now(),
+                updatedAt: nextUpdatedAt(t.updatedAt),
               }
             : t
         )
@@ -585,7 +602,7 @@ export default function ChatPage() {
         isSql: false,
       })
     } finally {
-      setIsLoading(false)
+      setThreadSending(activeThreadId, false)
     }
   }
 
@@ -601,7 +618,7 @@ export default function ChatPage() {
     setError(null)
 
     if (active && active.mode === 'sql') {
-      updateActive(t => ({ ...t, schemaId, updatedAt: Date.now() }))
+      updateActive(t => ({ ...t, schemaId, updatedAt: nextUpdatedAt(t.updatedAt) }))
     }
   }
 
@@ -665,7 +682,7 @@ export default function ChatPage() {
       })
       setSelectedSchemaId(saved.id)
       if (active?.mode === 'sql') {
-        updateActive(t => ({ ...t, schemaId: saved.id, updatedAt: Date.now() }))
+        updateActive(t => ({ ...t, schemaId: saved.id, updatedAt: nextUpdatedAt(t.updatedAt) }))
       }
 
       setEditingSchemaId(saved.id)
@@ -940,7 +957,7 @@ export default function ChatPage() {
                   content={message.content}
                   isSql={message.isSql}
                   isLoading={
-                    isLoading &&
+                    activeThreadIsSending &&
                     message.role === 'assistant' &&
                     !message.content
                   }
@@ -960,8 +977,8 @@ export default function ChatPage() {
             <div className="pt-4">
               <ChatInput
                 onSubmit={handleSendMessage}
-                isLoading={isLoading}
-                disabled={isLoading}
+                isLoading={activeThreadIsSending}
+                disabled={activeThreadIsSending}
                 placeholder={
                   active.mode === 'sql'
                     ? 'Describe the query you want...'

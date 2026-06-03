@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Request, Response, status
+from fastapi import FastAPI, HTTPException, Depends, Request, Response, status, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -18,6 +18,7 @@ from sqlalchemy import (
     create_engine, Column, String, Boolean, Integer, Text, BigInteger,
     ForeignKey, text, inspect
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
 
 # ---------------------------------------------------------------------------
@@ -107,15 +108,9 @@ def init_db():
 app = FastAPI()
 
 # Enable CORS for Next.js frontend
-raw_cors_origins = os.getenv(
-    "CORS_ALLOW_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000",
-)
-CORS_ALLOW_ORIGINS = [o.strip() for o in raw_cors_origins.split(",") if o.strip()]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ALLOW_ORIGINS,
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -127,14 +122,17 @@ OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://host.docker.internal:11434"
 # Use small, fast models tuned for CPU / 8GB RAM laptops.
 # Override via env if you want to try bigger ones.
 CHAT_MODEL_NAME = os.getenv("CHAT_MODEL_NAME", os.getenv("MODEL_NAME", "llama3.2:1b"))
-SQL_MODEL_NAME = os.getenv("SQL_MODEL_NAME", "qwen2.5-coder:1.5b")
+SQL_MODEL_NAME = os.getenv("SQL_MODEL_NAME", "qwen2.5-coder:7b-instruct-q4_K_M")
 
 # Keep models hot in RAM so the next request doesn't pay the cold-load tax.
 KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "60m")
 
 # Context windows: smaller = much faster prompt processing on CPU.
 CHAT_NUM_CTX = int(os.getenv("CHAT_NUM_CTX", "2048"))
-SQL_NUM_CTX = int(os.getenv("SQL_NUM_CTX", "2560"))
+SQL_NUM_CTX = int(os.getenv("SQL_NUM_CTX", "4096"))
+SQL_WARMUP_NUM_CTX = int(os.getenv("SQL_WARMUP_NUM_CTX", str(min(SQL_NUM_CTX, 2048))))
+SCHEMA_WARMUP_LIMIT = int(os.getenv("SCHEMA_WARMUP_LIMIT", "6"))
+SQL_TEMPERATURE = float(os.getenv("SQL_TEMPERATURE", "0.1"))
 
 # Cap how many prior messages we forward (older turns rarely matter and slow CPU inference a lot).
 MAX_CHAT_HISTORY = int(os.getenv("MAX_CHAT_HISTORY", "8"))
@@ -150,9 +148,13 @@ CHAT_SYSTEM_PROMPT = (
 
 SQL_SYSTEM_PROMPT = (
     "You are a senior database engineer. Convert the user request into ONE valid "
-    "SQL SELECT/INSERT/UPDATE/DELETE statement that runs against the given schema. "
-    "Output ONLY the SQL, terminated with a single semicolon. No prose, no markdown, "
-    "no comments, no explanations, no code fences."
+    "and efficient SQL read-only query for the given schema. "
+    "STRICT SAFETY: Generate SELECT-only SQL. Never generate INSERT, UPDATE, DELETE, "
+    "CREATE, DROP, TRUNCATE, ALTER, MERGE, REPLACE, GRANT, REVOKE, EXEC, or CALL. "
+    "Output format must be exactly: "
+    "line 1 comment starting with '-- Reason:' explaining why this query answers the request; "
+    "then one SQL SELECT/ WITH...SELECT statement ending with a single semicolon. "
+    "No markdown fences."
 )
 
 # Keywords that strongly signal the user wants to MODIFY the previous query.
@@ -164,25 +166,33 @@ _REFINE_KEYWORDS = {
     "but only", "but filter", "but add", "but also",
 }
 
+_ENHANCEMENT_KEYWORDS = {
+    "enhance", "enhancement", "improve", "improvement", "optimize", "optimization",
+    "faster", "speed", "performance", "tune", "better",
+}
+
 SQL_RULES = (
     "Rules:\n"
-    "1. Use ONLY tables and columns that appear in the SCHEMA. Never invent names.\n"
-    "2. Match the exact casing of table and column names from the SCHEMA.\n"
-    "3. Prefer explicit JOIN ... ON syntax over comma joins. Qualify columns with table "
-    "aliases when joining.\n"
-    "4. Use clear short aliases (c for Customers, a for BankAccounts, s for Symbols, etc.).\n"
-    "5. Add WHERE / GROUP BY / ORDER BY / LIMIT only when the request asks for them.\n"
-    "6. Use the SQL dialect that matches the SCHEMA syntax. If the schema uses IDENTITY, "
-    "GETDATE(), BIT, NVARCHAR (T-SQL / SQL Server) then use TOP N and DATEADD/GETDATE for dates. "
-    "If the schema looks like MySQL then use LIMIT N and CURDATE() / INTERVAL.\n"
-    "7. For aggregate questions use COUNT/SUM/AVG/MIN/MAX with GROUP BY as needed.\n"
-    "8. Use single quotes for string and date literals. Dates as 'YYYY-MM-DD'.\n"
-    "9. When refining a prior query, KEEP its existing SELECT columns, filters, joins, "
-    "ordering and limits unless the new request explicitly changes them. Only add or "
-    "adjust what was asked. To add a column from another table, ADD a JOIN and ADD the "
-    "column to the SELECT list \u2014 do NOT replace the original query.\n"
-    "10. Return exactly one statement ending with ';'. No trailing text."
+    "1. Use ONLY tables and columns that exist in SCHEMA. Never invent names.\n"
+    "2. Match the SQL dialect shown by SCHEMA and never mix dialect syntax.\n"
+    "3. Output must stay read-only: SELECT or WITH...SELECT only. Never write DML/DDL.\n"
+    "4. Use explicit JOIN ... ON and qualify columns with aliases in multi-table queries.\n"
+    "5. Never use SELECT *. Return only needed columns.\n"
+    "6. Push filters into WHERE early, avoid unnecessary subqueries, and use LIMIT/TOP when user asks for samples or top N.\n"
+    "7. Avoid functions on indexed filter columns; prefer sargable ranges.\n"
+    "8. Use IS NULL / IS NOT NULL for null checks and single quotes for literals.\n"
+    "9. For refinements, keep existing logic and change only what the new request asks.\n"
+    "10. Return exactly two leading comments (-- Reason) then one SQL statement ending with ';'.\n"
 )
+
+FORBIDDEN_SQL_KEYWORDS = {
+    "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "TRUNCATE", "ALTER",
+    "MERGE", "REPLACE", "GRANT", "REVOKE", "EXEC", "CALL",
+}
+
+# In-memory schema summary cache to avoid repeated parsing and support schema warmups.
+SCHEMA_SUMMARY_CACHE: dict[str, str] = {}
+WARMED_SCHEMA_IDS: set[str] = set()
 
 AUTH_SECRET = os.getenv("AUTH_SECRET", "matrixchat-dev-secret-change-me")
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "604800"))
@@ -202,6 +212,12 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class UpdateProfileRequest(BaseModel):
+    currentPassword: str
+    username: Optional[str] = None
+    newPassword: Optional[str] = None
 
 class ChatMessage(BaseModel):
     role: str
@@ -447,6 +463,41 @@ def me(current_user: UserModel = Depends(get_current_user)):
     return AuthUserSchema(id=current_user.id, username=current_user.username)
 
 
+@app.put("/auth/profile", response_model=AuthUserSchema)
+def update_profile(
+    body: UpdateProfileRequest,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user),
+):
+    if not verify_password(body.currentPassword, current_user.password_hash):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+
+    next_username = body.username.strip().lower() if body.username is not None else current_user.username
+    next_password = body.newPassword if body.newPassword is not None else None
+
+    wants_username_change = next_username != current_user.username
+    wants_password_change = bool(next_password)
+    if not wants_username_change and not wants_password_change:
+        raise HTTPException(status_code=400, detail="No profile changes were provided")
+
+    if wants_username_change:
+        if len(next_username) < 3:
+            raise HTTPException(status_code=400, detail="Username must be at least 3 characters")
+        existing = db.query(UserModel).filter(UserModel.username == next_username).first()
+        if existing and existing.id != current_user.id:
+            raise HTTPException(status_code=409, detail="Username already exists")
+        current_user.username = next_username
+
+    if wants_password_change:
+        if len(next_password) < 6:
+            raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+        current_user.password_hash = hash_password(next_password)
+
+    db.commit()
+    db.refresh(current_user)
+    return AuthUserSchema(id=current_user.id, username=current_user.username)
+
+
 def get_schema_summary(schema: str) -> str:
     """Build a compact table/column summary for faster text-to-SQL prompts."""
     tables: list[str] = []
@@ -479,6 +530,76 @@ def get_schema_summary(schema: str) -> str:
     return "\n".join(tables)
 
 
+def get_schema_summary_cached(schema_id: str, schema_text: str) -> str:
+    cached = SCHEMA_SUMMARY_CACHE.get(schema_id)
+    if cached is not None:
+        return cached
+    summary = get_schema_summary(schema_text)
+    SCHEMA_SUMMARY_CACHE[schema_id] = summary
+    return summary
+
+
+def remove_schema_cache(schema_id: str) -> None:
+    SCHEMA_SUMMARY_CACHE.pop(schema_id, None)
+    WARMED_SCHEMA_IDS.discard(schema_id)
+
+
+def build_schema_warmup_prompt(schema_summary: str) -> str:
+    return (
+        f"{SQL_SYSTEM_PROMPT}\n\n"
+        f"SCHEMA (table: columns):\n{schema_summary}\n\n"
+        f"{SQL_RULES}\n\n"
+        "Warmup task: acknowledge schema context with one token."
+    )
+
+
+async def warm_sql_schema_context(schema_id: str, schema_summary: str) -> None:
+    """Warm SQL model using schema context so first real query responds faster."""
+    if not schema_summary.strip():
+        return
+    try:
+        prompt = build_schema_warmup_prompt(schema_summary)
+        async with httpx.AsyncClient(timeout=300) as client:
+            await client.post(
+                f"{OLLAMA_API_URL}/api/generate",
+                json={
+                    "model": SQL_MODEL_NAME,
+                    "prompt": prompt,
+                    "stream": False,
+                    "keep_alive": KEEP_ALIVE,
+                    "options": build_options(
+                        num_ctx=SQL_WARMUP_NUM_CTX,
+                        num_predict=1,
+                        temperature=0.0,
+                    ),
+                },
+            )
+        WARMED_SCHEMA_IDS.add(schema_id)
+        print(f"[warm] SQL schema context ready: {schema_id}")
+    except Exception as exc:
+        print(f"[warm] Could not warm schema context {schema_id}: {exc}")
+
+
+async def warm_recent_schema_contexts() -> None:
+    if SessionLocal is None:
+        return
+    db = SessionLocal()
+    try:
+        recent_schemas = (
+            db.query(SqlSchemaModel)
+            .order_by(SqlSchemaModel.updated_at.desc())
+            .limit(max(SCHEMA_WARMUP_LIMIT, 0))
+            .all()
+        )
+        for item in recent_schemas:
+            summary = get_schema_summary_cached(item.id, item.schema_text)
+            await warm_sql_schema_context(item.id, summary)
+    except Exception as exc:
+        print(f"[warm] Could not preload schema contexts: {exc}")
+    finally:
+        db.close()
+
+
 def _schema_to_response(item: SqlSchemaModel) -> UserSchemaResponse:
     return UserSchemaResponse(
         id=item.id,
@@ -505,6 +626,7 @@ def list_user_schemas(
 @app.post("/schemas", response_model=UserSchemaResponse, status_code=status.HTTP_201_CREATED)
 def create_user_schema(
     body: UserSchemaRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: UserModel = Depends(get_current_user),
 ):
@@ -524,6 +646,8 @@ def create_user_schema(
     )
     db.add(item)
     db.commit()
+    summary = get_schema_summary_cached(item.id, item.schema_text)
+    background_tasks.add_task(warm_sql_schema_context, item.id, summary)
     return _schema_to_response(item)
 
 
@@ -531,6 +655,7 @@ def create_user_schema(
 def update_user_schema(
     schema_id: str,
     body: UserSchemaRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: UserModel = Depends(get_current_user),
 ):
@@ -553,6 +678,9 @@ def update_user_schema(
     item.schema_text = cleaned
     item.updated_at = int(datetime.now(timezone.utc).timestamp() * 1000)
     db.commit()
+    remove_schema_cache(item.id)
+    summary = get_schema_summary_cached(item.id, item.schema_text)
+    background_tasks.add_task(warm_sql_schema_context, item.id, summary)
     return _schema_to_response(item)
 
 
@@ -572,32 +700,66 @@ def delete_user_schema(
     db.query(ThreadModel).filter(ThreadModel.schema_id == schema_id).update({"schema_id": None})
     db.delete(item)
     db.commit()
+    remove_schema_cache(schema_id)
 
 def extract_sql_from_response(response: str) -> str:
-    """Extract SQL query from LLM response"""
-    response = re.sub(r'```sql\n?', '', response)
-    response = re.sub(r'```\n?', '', response)
+    """Extract SQL (including leading -- comments) from LLM response."""
+    response = re.sub(r"```sql\n?", "", response, flags=re.IGNORECASE)
+    response = re.sub(r"```\n?", "", response)
+    response = response.strip()
 
-    sql_pattern = r'(?:SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER)[^;]*;?'
-    matches = re.findall(sql_pattern, response, re.IGNORECASE)
+    # Keep optional leading SQL comments and capture the first SELECT/WITH statement.
+    pattern = re.compile(r"(?is)((?:\s*(?:--[^\n]*\n|/\*.*?\*/\s*))*\s*(?:WITH|SELECT)\b.*)")
+    match = pattern.search(response)
+    candidate = match.group(1).strip() if match else response
 
-    if matches:
-        sql = matches[0].strip()
-        if not sql.endswith(';'):
-            sql += ';'
-        return sql
+    semicolon_pos = candidate.find(";")
+    if semicolon_pos >= 0:
+        candidate = candidate[:semicolon_pos + 1]
+    elif candidate:
+        candidate = candidate + ";"
 
-    lines = response.strip().split('\n')
-    sql_lines = []
-    for line in lines:
-        line = line.strip()
-        if line and not any(word in line.lower() for word in ['explanation', 'note:', 'answer:', 'here', 'this', 'the query']):
-            sql_lines.append(line)
+    return candidate.strip()
 
-    result = ' '.join(sql_lines).strip()
-    if not result.endswith(';'):
-        result += ';'
-    return result
+
+def is_select_only_sql(sql: str) -> tuple[bool, str]:
+    """Validate that SQL is a single read-only SELECT statement."""
+    if not sql or not sql.strip():
+        return False, "Empty SQL response"
+
+    without_block_comments = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
+    without_comments = re.sub(r"--.*?$", " ", without_block_comments, flags=re.MULTILINE).strip()
+
+    if not re.match(r"^(WITH|SELECT)\b", without_comments, re.IGNORECASE):
+        return False, "Query must begin with SELECT or WITH"
+
+    sql_no_trailing = without_comments[:-1] if without_comments.endswith(";") else without_comments
+    if ";" in sql_no_trailing:
+        return False, "Only one SQL statement is allowed"
+
+    for keyword in FORBIDDEN_SQL_KEYWORDS:
+        if re.search(rf"\b{keyword}\b", without_comments, re.IGNORECASE):
+            return False, f"Forbidden keyword detected: {keyword}"
+
+    return True, ""
+
+
+def ensure_sql_comments(sql: str, user_query: str) -> str:
+    """Ensure output starts with reason SQL comments as required by UI."""
+    body = (sql or "").strip()
+    lines = body.splitlines()
+    has_reason = any(line.strip().lower().startswith("-- reason:") for line in lines[:3])
+    if has_reason:
+        return body
+
+    compact_query = re.sub(r"\s+", " ", user_query).strip()
+    if len(compact_query) > 140:
+        compact_query = compact_query[:137] + "..."
+
+    comment_prefix = (
+        f"-- Reason: This SELECT query is generated to answer: {compact_query}\n"
+    )
+    return f"{comment_prefix}\n{body}"
 
 
 def build_options(num_ctx: int, num_predict: Optional[int] = None,
@@ -647,6 +809,7 @@ async def startup_warmup() -> None:
     # Don't block startup — warm in the background.
     asyncio.create_task(warm_model(CHAT_MODEL_NAME, CHAT_NUM_CTX))
     asyncio.create_task(warm_model(SQL_MODEL_NAME, SQL_NUM_CTX))
+    asyncio.create_task(warm_recent_schema_contexts())
 
 
 @app.get("/health")
@@ -729,6 +892,17 @@ def upsert_thread(thread_id: str, body: UpsertThreadRequest,
         if schema_exists is None:
             raise HTTPException(status_code=400, detail="Invalid schema id")
 
+    def apply_messages() -> None:
+        for pos, msg in enumerate(data.messages):
+            db.add(MessageModel(
+                id=msg.id,
+                thread_id=data.id,
+                role=msg.role,
+                content=msg.content,
+                is_sql=msg.isSql,
+                position=pos,
+            ))
+
     if t is None:
         existing_other = db.query(ThreadModel).filter(ThreadModel.id == thread_id).first()
         if existing_other is not None:
@@ -737,6 +911,26 @@ def upsert_thread(thread_id: str, body: UpsertThreadRequest,
                         title=data.title, mode=data.mode,
                         updated_at=data.updatedAt)
         db.add(t)
+        apply_messages()
+        try:
+            db.commit()
+        except IntegrityError:
+            # Concurrent upserts can race on insert for the same thread id.
+            db.rollback()
+            t = (
+                db.query(ThreadModel)
+                .filter(ThreadModel.id == thread_id, ThreadModel.user_id == current_user.id)
+                .first()
+            )
+            if t is None:
+                raise HTTPException(status_code=409, detail="Thread id already exists")
+            t.title = data.title
+            t.mode = data.mode
+            t.schema_id = schema_id
+            t.updated_at = data.updatedAt
+            db.query(MessageModel).filter(MessageModel.thread_id == thread_id).delete()
+            apply_messages()
+            db.commit()
     else:
         t.title = data.title
         t.mode = data.mode
@@ -744,17 +938,9 @@ def upsert_thread(thread_id: str, body: UpsertThreadRequest,
         t.updated_at = data.updatedAt
         # Delete existing messages; we replace them wholesale.
         db.query(MessageModel).filter(MessageModel.thread_id == thread_id).delete()
+        apply_messages()
+        db.commit()
 
-    for pos, msg in enumerate(data.messages):
-        db.add(MessageModel(
-            id=msg.id,
-            thread_id=data.id,
-            role=msg.role,
-            content=msg.content,
-            is_sql=msg.isSql,
-            position=pos,
-        ))
-    db.commit()
     db.refresh(t)
     return _thread_to_schema(t)
 
@@ -783,45 +969,45 @@ def _keyword_intent(request: str) -> Optional[bool]:
     return None
 
 
-async def classify_intent(client: httpx.AsyncClient, model: str,
-                          last_sql: str, new_request: str) -> bool:
-    """
-    Ask the model whether new_request is a REFINEMENT of last_sql or a NEW query.
-    Uses a tiny forced-choice prompt with num_predict=4 so it's very fast.
-    Returns True if REFINE, False if NEW.
-    """
-    prompt = (
-        "Decide if the new database request should REFINE the existing SQL or start as a NEW query.\n\n"
-        f"Existing SQL: {last_sql}\n"
-        f"New request: {new_request}\n\n"
-        "Reply with exactly one word.\n"
-        "- If the request adds/changes/removes something in the existing SQL → REFINE\n"
-        "- If the request is about completely different data or a new unrelated question → NEW\n"
-        "Answer:"
-    )
-    try:
-        resp = await client.post(
-            f"{OLLAMA_API_URL}/api/generate",
-            json={
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "keep_alive": KEEP_ALIVE,
-                "options": {
-                    "num_predict": 4,
-                    "temperature": 0.0,
-                    "num_ctx": 512,
-                },
-            },
-        )
-        if resp.status_code == 200:
-            answer = resp.json().get("response", "").strip().upper()
-            print(f"[sql] intent classifier answer: {answer!r}")
-            return "REFINE" in answer
-    except Exception as exc:
-        print(f"[sql] intent classifier failed: {exc}")
-    # Default to fresh query on any error.
-    return False
+# async def classify_intent(client: httpx.AsyncClient, model: str,
+#                           last_sql: str, new_request: str) -> bool:
+#     """
+#     Ask the model whether new_request is a REFINEMENT of last_sql or a NEW query.
+#     Uses a tiny forced-choice prompt with num_predict=4 so it's very fast.
+#     Returns True if REFINE, False if NEW.
+#     """
+#     prompt = (
+#         "Decide if the new database request should REFINE the existing SQL or start as a NEW query.\n\n"
+#         f"Existing SQL: {last_sql}\n"
+#         f"New request: {new_request}\n\n"
+#         "Reply with exactly one word.\n"
+#         "- If the request adds/changes/removes something in the existing SQL → REFINE\n"
+#         "- If the request is about completely different data or a new unrelated question → NEW\n"
+#         "Answer:"
+#     )
+#     try:
+#         resp = await client.post(
+#             f"{OLLAMA_API_URL}/api/generate",
+#             json={
+#                 "model": model,
+#                 "prompt": prompt,
+#                 "stream": False,
+#                 "keep_alive": KEEP_ALIVE,
+#                 "options": {
+#                     "num_predict": 4,
+#                     "temperature": 0.0,
+#                     "num_ctx": 512,
+#                 },
+#             },
+#         )
+#         if resp.status_code == 200:
+#             answer = resp.json().get("response", "").strip().upper()
+#             print(f"[sql] intent classifier answer: {answer!r}")
+#             return "REFINE" in answer
+#     except Exception as exc:
+#         print(f"[sql] intent classifier failed: {exc}")
+#     # Default to fresh query on any error.
+#     return False
 
 
 def extract_last_sql(messages: Optional[list[TextToSqlMessage]],
@@ -852,6 +1038,11 @@ def extract_last_sql(messages: Optional[list[TextToSqlMessage]],
     return None
 
 
+def _is_enhancement_request(query: str) -> bool:
+    lower = query.lower()
+    return any(keyword in lower for keyword in _ENHANCEMENT_KEYWORDS)
+
+
 @app.post("/text-to-sql")
 async def text_to_sql(
     request: TextToSqlRequest,
@@ -874,27 +1065,25 @@ async def text_to_sql(
         if user_schema is None:
             raise HTTPException(status_code=400, detail="Schema not found")
 
-        schema_summary = get_schema_summary(user_schema.schema_text)
+        schema_summary = get_schema_summary_cached(user_schema.id, user_schema.schema_text)
         model = request.model or SQL_MODEL_NAME
         last_sql = extract_last_sql(request.messages, request.query)
+        is_enhancement = _is_enhancement_request(request.query)
+
+        if user_schema.id not in WARMED_SCHEMA_IDS:
+            asyncio.create_task(warm_sql_schema_context(user_schema.id, schema_summary))
 
         # Determine intent: refine the last SQL or generate a fresh one.
         is_refinement = False
         if last_sql:
+            # Fast path: avoid extra model classification call for lower latency.
             kw = _keyword_intent(request.query)
-            if kw is True:
-                is_refinement = True
-                print(f"[sql] intent=REFINE (keyword match)")
-            elif kw is False:
-                is_refinement = False
-                print(f"[sql] intent=NEW (keyword match)")
-            else:
-                # Ambiguous — ask the model.
-                async with httpx.AsyncClient(timeout=60) as clf_client:
-                    is_refinement = await classify_intent(clf_client, model, last_sql, request.query)
+            is_refinement = (kw is True) or is_enhancement
+            print(f"[sql] intent={'REFINE' if is_refinement else 'NEW'} (fast heuristic)")
 
         if is_refinement and last_sql:
             print(f"[sql] refining prior SQL: {last_sql!r}")
+            enhancement_block = ""
             task_block = (
                 f"### Current query\n{last_sql}\n\n"
                 f"### Modification request\n"
@@ -903,7 +1092,9 @@ async def text_to_sql(
                 "Take the Current query above as the base. Apply ONLY the modification "
                 "described. Keep every existing SELECT column, JOIN, WHERE condition, "
                 "ORDER BY and LIMIT from the base query. Only add or change what the "
-                "modification asks for. Output the full updated SQL ending with ';':\n"
+                "modification asks for. Keep it read-only (SELECT or WITH...SELECT only). "
+                "Return '-- Reason', then the full updated SQL ending with ';'."
+                f"{enhancement_block}\n"
                 "SQL:"
             )
         else:
@@ -914,16 +1105,11 @@ async def text_to_sql(
             f"{SQL_SYSTEM_PROMPT}\n\n"
             f"SCHEMA (table: columns):\n{schema_summary}\n\n"
             f"{SQL_RULES}\n\n"
-            "### Example (fresh query)\n"
-            "REQUEST: list all trades from the past week\n"
-            "SQL: SELECT t.* FROM Trades t WHERE t.TradeDate >= DATEADD(day, -7, CAST(GETDATE() AS DATE));\n\n"
-            "### Example (refinement)\n"
-            "Current query: SELECT t.* FROM Trades t WHERE t.TradeDate >= DATEADD(day, -7, CAST(GETDATE() AS DATE));\n"
-            "Modification request: also include the customer name\n"
-            "SQL: SELECT t.*, c.FullName FROM Trades t "
-            "JOIN TradingCodes tc ON tc.TradingCodeID = t.TradingCodeID "
-            "JOIN Customers c ON c.CustomerID = tc.CustomerID "
-            "WHERE t.TradeDate >= DATEADD(day, -7, CAST(GETDATE() AS DATE));\n\n"
+            "### Example\n"
+            "REQUEST: list top 10 recent orders\n"
+            "SQL:\n"
+            "-- Reason: The query returns the most recent orders requested by the user.\n"
+            "SELECT o.OrderID, o.OrderDate FROM Orders o ORDER BY o.OrderDate DESC LIMIT 10;\n\n"
             f"{task_block}"
         )
 
@@ -936,11 +1122,11 @@ async def text_to_sql(
                     "stream": False,
                     "keep_alive": KEEP_ALIVE,
                     "options": build_options(
-                        num_ctx=SQL_NUM_CTX,
-                        num_predict=256,
-                        temperature=0.0,
-                        top_p=0.5,
-                        top_k=20,
+                        num_ctx=min(SQL_NUM_CTX, 1600),
+                        num_predict=180,
+                        temperature=max(0.0, min(SQL_TEMPERATURE, 0.3)),
+                        top_p=0.4,
+                        top_k=12,
                         repeat_penalty=1.05,
                         stop=["###", "REQUEST:", "Explanation:", "Note:", "```"],
                         # No ';' stop — let model output the full statement;
@@ -973,6 +1159,11 @@ async def text_to_sql(
         raw_response = result.get("response", "").strip()
         print(f"[sql] raw model response: {raw_response!r}")
         sql_query = extract_sql_from_response(raw_response)
+        sql_query = ensure_sql_comments(sql_query, request.query)
+
+        is_safe, reason = is_select_only_sql(sql_query)
+        if not is_safe:
+            raise HTTPException(status_code=422, detail=f"Unsafe SQL blocked: {reason}")
 
         return TextToSqlResponse(
             sql=sql_query,
