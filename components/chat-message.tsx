@@ -104,7 +104,7 @@ export function ChatMessage({ role, content, isLoading, isSql, onRetry, retryDis
           {/* Removed user/AI icon near copy icon */}
           {isAssistantError && onRetry && (
             <button
-              type="button"
+               type="button" 
               onClick={onRetry}
               disabled={!!retryDisabled}
               aria-label="Retry"
