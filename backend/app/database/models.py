@@ -53,6 +53,12 @@ class ThreadModel(Base):
         cascade="all, delete-orphan",
         order_by="PromptModel.created_at",
     )
+    sql_generation_logs = relationship(
+        "SqlGenerationLogModel",
+        back_populates="thread",
+        cascade="all, delete-orphan",
+        order_by="SqlGenerationLogModel.created_at",
+    )
 
 
 class MessageModel(Base):
@@ -74,3 +80,25 @@ class PromptModel(Base):
     prompt_text = Column(Text, nullable=False, default="")
     created_at = Column(BigInteger, nullable=False)
     thread = relationship("ThreadModel", back_populates="prompts")
+
+
+class SqlGenerationLogModel(Base):
+    """Audit trail for SQL generation: intent decision, prompt, and model output."""
+    __tablename__ = "sql_generation_logs"
+    id = Column(String, primary_key=True)
+    thread_id = Column(String, ForeignKey("threads.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_message_id = Column(String, nullable=True, index=True)
+    assistant_message_id = Column(String, nullable=False, index=True)
+    user_query = Column(Text, nullable=False, default="")
+    intent = Column(String, nullable=False)
+    intent_source = Column(String, nullable=False)
+    heuristic_intent = Column(String, nullable=False, default="")
+    classifier_answer = Column(Text, nullable=False, default="")
+    sql_provider = Column(String, nullable=False, default="")
+    model = Column(String, nullable=False, default="")
+    cached = Column(Boolean, nullable=False, default=False)
+    prompt_text = Column(Text, nullable=False, default="")
+    raw_response = Column(Text, nullable=False, default="")
+    generated_sql = Column(Text, nullable=False, default="")
+    created_at = Column(BigInteger, nullable=False)
+    thread = relationship("ThreadModel", back_populates="sql_generation_logs")

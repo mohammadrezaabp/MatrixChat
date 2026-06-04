@@ -41,15 +41,30 @@ services:
     container_name: matrix-ollama
     ports:
       - "11434:11434"
+    # Requires Docker Desktop GPU support + NVIDIA drivers (Windows: WSL2 backend).
     gpus: all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     environment:
       - OLLAMA_NUM_PARALLEL=1
       - OLLAMA_MAX_LOADED_MODELS=1
       - OLLAMA_KEEP_ALIVE=30m
+      - OLLAMA_FLASH_ATTENTION=1
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     volumes:
       - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 40s
     restart: unless-stopped
 
   backend:
@@ -72,10 +87,14 @@ services:
       - SQL_MODEL_NAME=DeepSeek-V4-Pro
       - OLLAMA_BASE_URL=http://ollama:11434
       - OLLAMA_SQL_MODEL=qwen2.5-coder:7b-instruct-q4_K_M
+      - OLLAMA_NUM_GPU=-1
+      - OLLAMA_WARMUP_ON_STARTUP=true
       - OLLAMA_SQL_NUM_CTX=2048
-      - OLLAMA_SQL_NUM_PREDICT=220
-      - OLLAMA_SQL_NUM_BATCH=128
+      - OLLAMA_SQL_NUM_PREDICT=256
+      - OLLAMA_SQL_NUM_BATCH=256
       - OLLAMA_KEEP_ALIVE=30m
+      - SQL_INTENT_USE_OLLAMA_CLASSIFIER=true
+      - SQL_INTENT_CLASSIFIER_ENABLED=false
       - OLLAMA_MAX_RETRIES=1
       - OLLAMA_INITIAL_RETRY_DELAY_SECONDS=0.5
       - OLLAMA_TIMEOUT_SECONDS=120
@@ -89,7 +108,7 @@ services:
       postgres:
         condition: service_healthy
       ollama:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - ./backend:/app
     restart: unless-stopped

@@ -44,10 +44,16 @@ const WELCOME_TEXT = 'Welcome to Construct...'
 const DEEPSEEK_SQL_PROVIDER = 'deepseek'
 const OLLAMA_SQL_PROVIDER = 'ollama'
 
-function formatSqlStatus(intent?: string | null, cached?: boolean): string | undefined {
-  if (cached) return 'Instant reply (cached)'
-  if (intent === 'refine') return 'Refining previous query'
-  if (intent === 'enhance') return 'Optimizing previous query'
+function formatSqlStatus(
+  intent?: string | null,
+  cached?: boolean,
+  intentSource?: string | null
+): string | undefined {
+  if (cached) return 'Instant reply (same question as before)'
+  const src = intentSource ? ` · ${intentSource}` : ''
+  if (intent === 'refine') return `Refining previous query${src}`
+  if (intent === 'enhance') return `Optimizing previous query${src}`
+  if (intent === 'fresh') return `New query${src}`
   return undefined
 }
 
@@ -733,6 +739,7 @@ export default function ChatPage() {
           schemaId: targetThread.schemaId,
           model: targetThread.sqlModel || DEEPSEEK_SQL_PROVIDER,
           threadId: activeThreadId,
+          userMessageId: userMsg.id,
           assistantMessageId: assistantId,
           messages: historyForApi,
         }),
@@ -747,7 +754,7 @@ export default function ChatPage() {
       patchAssistant({
         content: data.sql,
         isSql: true,
-        sqlStatus: formatSqlStatus(data.intent, data.cached),
+        sqlStatus: formatSqlStatus(data.intent, data.cached, data.intentSource),
       })
     } catch (err) {
       const errorMessage =

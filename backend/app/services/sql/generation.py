@@ -12,6 +12,7 @@ from app.config import (
     AI_SERVICE_TIMEOUT_SECONDS,
     OLLAMA_BASE_URL,
     OLLAMA_KEEP_ALIVE,
+    OLLAMA_NUM_GPU,
     OLLAMA_SQL_MODEL,
     OLLAMA_SQL_NUM_BATCH,
     OLLAMA_SQL_NUM_CTX,
@@ -33,13 +34,20 @@ from app.services.ai.client import (
 from app.services.ai.ollama import extract_ollama_message_content, post_ollama_chat_completion
 from app.services.ai.providers import resolve_sql_provider
 from app.services.schema_summary import WARMED_SCHEMA_IDS, get_schema_summary_cached
+from app.services.sql.audit import persist_sql_generation_log
 from app.services.sql.cache import (
     build_sql_cache_fuzzy_bucket,
     build_sql_cache_key,
+    lookup_cached_sql,
     normalize_query_for_cache,
     sql_response_cache,
 )
-from app.services.sql.intent import extract_last_sql, resolve_sql_intent
+from app.services.sql.intent import (
+    IntentResult,
+    extract_last_sql,
+    resolve_sql_intent,
+)
+from app.services.sql.intent import INTENT_SOURCE_CACHE
 from app.services.sql.prompts import build_sql_prompt
 from app.services.sql.safety import (
     ensure_sql_comments,
@@ -88,6 +96,50 @@ def persist_prompt(
     db.commit()
 
 
+def _finish_response(
+    *,
+    sql: str,
+    request: TextToSqlRequest,
+    model: str,
+    prompt: str,
+    intent_result: IntentResult,
+    cached: bool,
+    db: Session,
+    current_user: UserModel,
+    sql_provider: str,
+    raw_response: str = "",
+) -> TextToSqlResponse:
+    if request.threadId and request.assistantMessageId:
+        persist_sql_generation_log(
+            db,
+            thread_id=request.threadId,
+            user_id=current_user.id,
+            user_message_id=request.userMessageId,
+            assistant_message_id=request.assistantMessageId,
+            user_query=request.query,
+            intent_result=intent_result,
+            sql_provider=sql_provider,
+            model=model,
+            cached=cached,
+            prompt_text=prompt,
+            raw_response=raw_response,
+            generated_sql=sql,
+        )
+
+    log_source = INTENT_SOURCE_CACHE if cached else intent_result.source
+    return TextToSqlResponse(
+        sql=sql,
+        query=request.query,
+        model=model,
+        prompt=prompt,
+        cached=cached,
+        intent=intent_result.intent,
+        intentSource=log_source,
+        classifierAnswer=intent_result.classifier_answer or None,
+        heuristicIntent=intent_result.heuristic_intent,
+    )
+
+
 async def generate_sql(
     request: TextToSqlRequest,
     current_user: UserModel,
@@ -124,13 +176,22 @@ async def generate_sql(
 
     try:
         async with httpx.AsyncClient(timeout=provider_timeout) as client:
-            intent = await resolve_sql_intent(
-                client, SQL_MODEL_NAME, request.query, last_sql
+            intent_result = await resolve_sql_intent(
+                client,
+                SQL_MODEL_NAME,
+                request.query,
+                last_sql,
+                sql_provider,
+                model,
             )
-            print(f"[sql] intent={intent}")
+            print(
+                f"[sql] intent={intent_result.intent} source={intent_result.source} "
+                f"heuristic={intent_result.heuristic_intent} "
+                f"classifier={intent_result.classifier_answer!r}"
+            )
 
             prompt = build_sql_prompt(
-                intent=intent,
+                intent=intent_result.intent,
                 query=request.query,
                 schema_summary=schema_summary,
                 schema_faq=schema_faq,
@@ -140,25 +201,17 @@ async def generate_sql(
                 compact_for_ollama=(sql_provider == SQL_PROVIDER_OLLAMA),
             )
 
-            cache_key = build_sql_cache_key(
-                user_schema.id,
-                user_schema.updated_at,
-                sql_provider,
-                model,
-                intent,
-                normalized_query,
-                last_sql,
+            cached_sql = lookup_cached_sql(
+                schema_id=user_schema.id,
+                schema_updated_at=user_schema.updated_at,
+                sql_provider=sql_provider,
+                model=model,
+                intent=intent_result.intent,
+                normalized_query=normalized_query,
+                last_sql=last_sql,
             )
-            fuzzy_bucket = build_sql_cache_fuzzy_bucket(
-                user_schema.id,
-                user_schema.updated_at,
-                sql_provider,
-                model,
-                intent,
-                last_sql,
-            )
-            cached_sql = sql_response_cache.get(cache_key, normalized_query, fuzzy_bucket)
             if cached_sql:
+                print("[sql] cache hit")
                 if request.threadId and request.assistantMessageId:
                     persist_prompt(
                         db,
@@ -167,13 +220,16 @@ async def generate_sql(
                         current_user.id,
                         prompt,
                     )
-                return TextToSqlResponse(
+                return _finish_response(
                     sql=cached_sql,
-                    query=request.query,
+                    request=request,
                     model=model,
                     prompt=prompt,
+                    intent_result=intent_result,
                     cached=True,
-                    intent=intent,
+                    db=db,
+                    current_user=current_user,
+                    sql_provider=sql_provider,
                 )
 
             if sql_provider == SQL_PROVIDER_OLLAMA:
@@ -195,6 +251,7 @@ async def generate_sql(
                             "num_ctx": max(256, OLLAMA_SQL_NUM_CTX),
                             "num_predict": max(64, OLLAMA_SQL_NUM_PREDICT),
                             "num_batch": max(32, OLLAMA_SQL_NUM_BATCH),
+                            "num_gpu": OLLAMA_NUM_GPU,
                         },
                     },
                 )
@@ -230,6 +287,23 @@ async def generate_sql(
             if not is_safe:
                 raise HTTPException(status_code=422, detail=f"Unsafe SQL blocked: {reason}")
 
+            cache_key = build_sql_cache_key(
+                user_schema.id,
+                user_schema.updated_at,
+                sql_provider,
+                model,
+                intent_result.intent,
+                normalized_query,
+                last_sql,
+            )
+            fuzzy_bucket = build_sql_cache_fuzzy_bucket(
+                user_schema.id,
+                user_schema.updated_at,
+                sql_provider,
+                model,
+                intent_result.intent,
+                last_sql,
+            )
             sql_response_cache.put(cache_key, sql_query, normalized_query, fuzzy_bucket)
 
             if request.threadId and request.assistantMessageId:
@@ -241,13 +315,17 @@ async def generate_sql(
                     prompt,
                 )
 
-            return TextToSqlResponse(
+            return _finish_response(
                 sql=sql_query,
-                query=request.query,
+                request=request,
                 model=model,
                 prompt=prompt,
+                intent_result=intent_result,
                 cached=False,
-                intent=intent,
+                db=db,
+                current_user=current_user,
+                sql_provider=sql_provider,
+                raw_response=raw_response,
             )
 
     except httpx.ConnectError:

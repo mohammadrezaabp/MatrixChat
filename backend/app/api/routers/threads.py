@@ -4,10 +4,12 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
-from app.api.schemas import MessageSchema, ThreadSchema, UpsertThreadRequest
+from app.api.schemas import MessageSchema, SqlGenerationLogSchema, ThreadSchema, UpsertThreadRequest
+from app.database.models import SqlGenerationLogModel
 from app.services.thread_export import build_thread_sql_export
+from app.utils.content_disposition import attachment_content_disposition
 from app.config import OLLAMA_SQL_MODEL, SQL_MODEL_NAME, SQL_PROVIDER_DEEPSEEK, SQL_PROVIDER_OLLAMA
 from app.database.models import MessageModel, PromptModel, SqlSchemaModel, ThreadModel, UserModel
 from app.database.session import get_db
@@ -72,6 +74,47 @@ def get_thread(
     return thread_to_schema(t)
 
 
+@router.get("/{thread_id}/sql-generation-logs", response_model=list[SqlGenerationLogSchema])
+def list_sql_generation_logs(
+    thread_id: str,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user),
+):
+    thread = (
+        db.query(ThreadModel)
+        .filter(ThreadModel.id == thread_id, ThreadModel.user_id == current_user.id)
+        .first()
+    )
+    if thread is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if thread.mode != "sql":
+        raise HTTPException(status_code=400, detail="Only SQL threads have generation logs")
+
+    logs = (
+        db.query(SqlGenerationLogModel)
+        .filter(SqlGenerationLogModel.thread_id == thread_id)
+        .order_by(SqlGenerationLogModel.created_at.asc())
+        .all()
+    )
+    return [
+        SqlGenerationLogSchema(
+            id=item.id,
+            assistantMessageId=item.assistant_message_id,
+            userMessageId=item.user_message_id,
+            userQuery=item.user_query,
+            intent=item.intent,
+            intentSource=item.intent_source,
+            heuristicIntent=item.heuristic_intent,
+            classifierAnswer=item.classifier_answer or "",
+            sqlProvider=item.sql_provider,
+            model=item.model,
+            cached=item.cached,
+            createdAt=item.created_at,
+        )
+        for item in logs
+    ]
+
+
 @router.get("/{thread_id}/export")
 def export_thread_queries(
     thread_id: str,
@@ -80,6 +123,7 @@ def export_thread_queries(
 ):
     t = (
         db.query(ThreadModel)
+        .options(joinedload(ThreadModel.messages))
         .filter(ThreadModel.id == thread_id, ThreadModel.user_id == current_user.id)
         .first()
     )
@@ -103,10 +147,10 @@ def export_thread_queries(
 
     filename, body = build_thread_sql_export(t, schema_title)
     return Response(
-        content=body,
+        content=body.encode("utf-8"),
         media_type="application/sql; charset=utf-8",
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}.sql"',
+            "Content-Disposition": attachment_content_disposition(filename),
         },
     )
 

@@ -53,6 +53,7 @@ class TextToSqlRequest(BaseModel):
     model: Optional[str] = None
     messages: Optional[list[TextToSqlMessage]] = None
     threadId: Optional[str] = None
+    userMessageId: Optional[str] = None
     assistantMessageId: Optional[str] = None
 
 
@@ -63,6 +64,9 @@ class TextToSqlResponse(BaseModel):
     prompt: Optional[str] = None
     cached: bool = False
     intent: Optional[str] = None
+    intentSource: Optional[str] = None
+    classifierAnswer: Optional[str] = None
+    heuristicIntent: Optional[str] = None
 
 
 class MessageSchema(BaseModel):
@@ -99,3 +103,18 @@ class UserSchemaResponse(BaseModel):
     schema: str
     faq: str
     updatedAt: int
+
+
+class SqlGenerationLogSchema(BaseModel):
+    id: str
+    assistantMessageId: str
+    userMessageId: Optional[str] = None
+    userQuery: str
+    intent: str
+    intentSource: str
+    heuristicIntent: str
+    classifierAnswer: str = ""
+    sqlProvider: str
+    model: str
+    cached: bool
+    createdAt: int

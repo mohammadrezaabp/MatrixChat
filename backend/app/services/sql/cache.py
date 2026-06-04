@@ -171,3 +171,33 @@ sql_response_cache = SqlResponseCache(
     SQL_CACHE_TTL_SECONDS,
     SQL_CACHE_FUZZY_THRESHOLD,
 )
+
+
+def lookup_cached_sql(
+    *,
+    schema_id: str,
+    schema_updated_at: int,
+    sql_provider: str,
+    model: str,
+    intent: str,
+    normalized_query: str,
+    last_sql: Optional[str],
+) -> Optional[str]:
+    cache_key = build_sql_cache_key(
+        schema_id,
+        schema_updated_at,
+        sql_provider,
+        model,
+        intent,
+        normalized_query,
+        last_sql,
+    )
+    fuzzy_bucket = build_sql_cache_fuzzy_bucket(
+        schema_id,
+        schema_updated_at,
+        sql_provider,
+        model,
+        intent,
+        last_sql,
+    )
+    return sql_response_cache.get(cache_key, normalized_query, fuzzy_bucket)

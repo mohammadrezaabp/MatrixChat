@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routers import create_api_router
 from app.config import CORS_ORIGINS
 from app.database.session import init_db
+from app.services.ai.ollama_warmup import warm_ollama_sql_model
 from app.services.warmup import warm_recent_schema_contexts
 
 
@@ -18,6 +19,7 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["Content-Disposition"],
     )
 
     application.include_router(create_api_router())
@@ -31,7 +33,8 @@ def create_app() -> FastAPI:
 
 
 async def delayed_schema_warmup() -> None:
-    await asyncio.sleep(5)
+    await asyncio.sleep(2)
+    await warm_ollama_sql_model()
     await warm_recent_schema_contexts()
 
 

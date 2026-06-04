@@ -23,6 +23,9 @@ OLLAMA_INITIAL_RETRY_DELAY_SECONDS = float(os.getenv("OLLAMA_INITIAL_RETRY_DELAY
 OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "120"))
 OLLAMA_SCHEMA_SUMMARY_MAX_CHARS = int(os.getenv("OLLAMA_SCHEMA_SUMMARY_MAX_CHARS", "2200"))
 OLLAMA_SCHEMA_FAQ_MAX_CHARS = int(os.getenv("OLLAMA_SCHEMA_FAQ_MAX_CHARS", "1200"))
+# -1 = offload all layers to GPU (recommended for 7B Q4 on 8GB VRAM)
+OLLAMA_NUM_GPU = int(os.getenv("OLLAMA_NUM_GPU", "-1"))
+OLLAMA_WARMUP_ON_STARTUP = os.getenv("OLLAMA_WARMUP_ON_STARTUP", "true").lower() in ("1", "true", "yes")
 SQL_PROVIDER_DEEPSEEK = "deepseek"
 SQL_PROVIDER_OLLAMA = "ollama"
 
@@ -37,6 +40,18 @@ SQL_CACHE_MAX_ENTRIES = int(os.getenv("SQL_CACHE_MAX_ENTRIES", "256"))
 SQL_CACHE_TTL_SECONDS = int(os.getenv("SQL_CACHE_TTL_SECONDS", "3600"))
 SQL_CACHE_FUZZY_THRESHOLD = float(os.getenv("SQL_CACHE_FUZZY_THRESHOLD", "0.92"))
 SQL_FAQ_EXAMPLES_MAX_CHARS = int(os.getenv("SQL_FAQ_EXAMPLES_MAX_CHARS", "800"))
+# Use local Ollama for ambiguous follow-up intent (fast, no cloud).
+SQL_INTENT_USE_OLLAMA_CLASSIFIER = os.getenv("SQL_INTENT_USE_OLLAMA_CLASSIFIER", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+# Optional DeepSeek classifier when Ollama classifier is off.
+SQL_INTENT_CLASSIFIER_ENABLED = os.getenv("SQL_INTENT_CLASSIFIER_ENABLED", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 MAX_CHAT_HISTORY = int(os.getenv("MAX_CHAT_HISTORY", "8"))
 
@@ -79,6 +94,7 @@ REFINE_KEYWORDS = {
     "instead", "replace", "without", "and show", "and get", "and add",
     "now filter", "now only", "now sort", "now order", "now group",
     "but only", "but filter", "but add", "but also",
+    "only", "just", "filter by", "sort by", "order by", "group by",
 }
 
 ENHANCEMENT_KEYWORDS = {
