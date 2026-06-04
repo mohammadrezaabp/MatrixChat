@@ -7,11 +7,14 @@ interface ChatMessageProps {
   content: string
   isLoading?: boolean
   isSql?: boolean
+  onRetry?: () => void
+  retryDisabled?: boolean
 }
 
-export function ChatMessage({ role, content, isLoading, isSql }: ChatMessageProps) {
+export function ChatMessage({ role, content, isLoading, isSql, onRetry, retryDisabled }: ChatMessageProps) {
   const [copied, setCopied] = useState(false)
   const isUser = role === 'user'
+  const isAssistantError = !isUser && content.trim().startsWith('[Error]')
   const logo = '/icon.svg'
   const userIcon = '/matrix-user.svg'
 
@@ -99,6 +102,20 @@ export function ChatMessage({ role, content, isLoading, isSql }: ChatMessageProp
         </div>
         <div className={`mt-1 flex w-fit items-center gap-2 text-xs text-muted-foreground ${isUser ? 'self-end' : 'self-start'}`}>
           {/* Removed user/AI icon near copy icon */}
+          {isAssistantError && onRetry && (
+            <button
+               type="button" 
+              onClick={onRetry}
+              disabled={!!retryDisabled}
+              aria-label="Retry"
+              className="inline-flex items-center justify-center rounded-sm border border-border/80 px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+                <path d="M20 11a8 8 0 1 0-2.34 5.66" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M20 4v7h-7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          )}
           {content && !isLoading && (
             <button
               type="button"

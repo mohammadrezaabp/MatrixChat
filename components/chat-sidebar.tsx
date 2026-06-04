@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { APP_VERSION } from '@/lib/version'
 
 export type Mode = 'chat' | 'sql'
@@ -10,6 +10,7 @@ export interface ThreadSummary {
   title: string
   mode: Mode
   schemaId?: string | null
+  sqlModel?: string | null
   updatedAt: number
 }
 
@@ -24,12 +25,10 @@ interface ChatSidebarProps {
   schemas: SchemaSummary[]
   username?: string | null
   onEditProfile?: () => void
-  selectedSchemaId: string | null
   activeId: string | null
   onSelect: (id: string) => void
   onNewChat: (mode: Mode) => void
   onDelete: (id: string) => void
-  onSelectSchema: (id: string) => void
   onCreateSchema: () => void
   onEditSchema: (id: string) => void
   onDeleteSchema: (id: string) => void
@@ -48,16 +47,21 @@ function formatRelative(ts: number) {
   return new Date(ts).toLocaleDateString()
 }
 
+function formatSqlModel(model: string | null | undefined) {
+  if (!model) return 'DeepSeek-V4-Pro'
+  if (model === 'ollama') return 'qwen2.5-coder:7b-instruct-q4_K_M'
+  if (model === 'deepseek') return 'DeepSeek-V4-Pro'
+  return model
+}
+
 export function ChatSidebar({
   threads,
   schemas,
   username,
-  selectedSchemaId,
   activeId,
   onSelect,
   onNewChat,
   onDelete,
-  onSelectSchema,
   onCreateSchema,
   onEditSchema,
   onDeleteSchema,
@@ -74,10 +78,11 @@ export function ChatSidebar({
   const [sqlExpanded, setSqlExpanded] = useState(false)
   const [profileMenuOpen, setProfileMenuOpen] = useState(false)
 
-  const sorted = [...threads].sort((a, b) => b.updatedAt - a.updatedAt)
-  const chatThreads = sorted.filter(t => t.mode === 'chat')
-  const sqlThreads = sorted.filter(t => t.mode === 'sql')
-  const sortedSchemas = [...schemas].sort((a, b) => b.updatedAt - a.updatedAt)
+  const sorted = useMemo(() => [...threads].sort((a, b) => b.updatedAt - a.updatedAt), [threads])
+  const chatThreads = useMemo(() => sorted.filter(t => t.mode === 'chat'), [sorted])
+  const sqlThreads = useMemo(() => sorted.filter(t => t.mode === 'sql'), [sorted])
+  const sortedSchemas = useMemo(() => [...schemas].sort((a, b) => b.updatedAt - a.updatedAt), [schemas])
+  const schemaTitleById = new Map(sortedSchemas.map((schema) => [schema.id, schema.title]))
 
   const visibleSchemas = sortedSchemas.slice(0, 3)
   const extraSchemas = sortedSchemas.slice(3)
@@ -114,7 +119,7 @@ export function ChatSidebar({
   const renderItem = (t: ThreadSummary) => (
     <li key={t.id}>
       <div
-        className={`group relative flex items-center gap-2 rounded-xl border px-3 py-2 text-sm transition-all ${
+        className={`group relative flex items-center gap-2 rounded-xl border px-3.5 py-2.5 text-sm transition-all ${
           activeId === t.id
             ? 'border-primary/80 bg-primary/10 text-foreground shadow-sm shadow-primary/20'
             : 'border-border/60 bg-background/50 text-foreground hover:border-border hover:bg-card/80'
@@ -126,12 +131,22 @@ export function ChatSidebar({
             onSelect(t.id)
             setOpen(false)
           }}
-          className="flex flex-1 flex-col items-start text-left"
+          className="flex flex-1 flex-col items-start gap-1 text-left"
         >
-          <span className="line-clamp-1 w-full">{t.title}</span>
-          <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+          <span className="line-clamp-1 w-full text-sm font-medium">{t.title}</span>
+          <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
             {t.mode === 'sql' ? 'SQL' : 'Chat'} · {formatRelative(t.updatedAt)}
           </span>
+          {t.mode === 'sql' && (
+            <span className="inline-flex max-w-full items-center rounded-md border border-border/70 bg-background/60 px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground/90">
+              Schema: {t.schemaId ? (schemaTitleById.get(t.schemaId) || 'Unknown') : 'Unknown'}
+            </span>
+          )}
+          {t.mode === 'sql' && (
+            <span className="inline-flex max-w-full items-center rounded-md border border-border/70 bg-background/60 px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground/90">
+              Model: {formatSqlModel(t.sqlModel)}
+            </span>
+          )}
         </button>
         <button
           type="button"
@@ -153,25 +168,14 @@ export function ChatSidebar({
   const renderSchemaItem = (s: SchemaSummary) => (
     <li key={s.id}>
       <div
-        className={`group relative flex items-center gap-2 rounded-xl border px-3 py-2 text-sm transition-all ${
-          selectedSchemaId === s.id
-            ? 'border-primary/80 bg-primary/10 text-foreground shadow-sm shadow-primary/20'
-            : 'border-border/60 bg-background/50 text-foreground hover:border-border hover:bg-card/80'
-        }`}
+        className="group relative flex items-center gap-2 rounded-xl border border-border/60 bg-background/50 px-3 py-2 text-sm text-foreground transition-all hover:border-border hover:bg-card/80"
       >
-        <button
-          type="button"
-          onClick={() => {
-            onSelectSchema(s.id)
-            setOpen(false)
-          }}
-          className="flex flex-1 flex-col items-start text-left"
-        >
+        <div className="flex flex-1 flex-col items-start text-left">
           <span className="line-clamp-1 w-full">{s.title}</span>
           <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
             {formatRelative(s.updatedAt)}
           </span>
-        </button>
+        </div>
         <button
           type="button"
           onClick={(e) => {
@@ -247,7 +251,7 @@ export function ChatSidebar({
         )}
       </div>
 
-      <div className="matrix-scrollbar mt-4 flex-1 min-h-0 overflow-y-auto pr-1">
+      <div className="matrix-scrollbar mt-4 flex-1 min-h-0 overflow-y-auto pr-1.5">
         <div className="space-y-4">
           {sorted.length === 0 && (
             <p className="px-2 py-2 text-center text-xs text-muted-foreground">
@@ -443,11 +447,11 @@ export function ChatSidebar({
       </button>
 
       {/* Desktop sidebar */}
-      <aside className="hidden h-dvh w-72 shrink-0 flex-col border-r border-border/70 bg-card/40 p-4 backdrop-blur md:flex">
+      <aside className="hidden h-dvh w-80 shrink-0 flex-col border-r border-border/70 bg-card/40 p-4 backdrop-blur md:flex">
         <div className="mb-4 flex items-center justify-center gap-2 px-1 text-center">
           <span className="text-lg font-semibold tracking-wide text-foreground">Construct</span>
           <span className="rounded-full border border-border bg-background/70 px-2 py-0.5 text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
-            v{APP_VERSION}
+            V{APP_VERSION}
           </span>
         </div>
         {sidebarBody}
@@ -496,7 +500,7 @@ export function ChatSidebar({
       {open && (
         <div className="fixed inset-0 z-40 md:hidden">
           <div className="absolute inset-0 bg-black/60" onClick={() => setOpen(false)} />
-          <aside className="absolute left-0 top-0 flex h-full w-72 flex-col border-r border-border bg-card p-4 shadow-xl">
+          <aside className="absolute left-0 top-0 flex h-full w-80 max-w-[90vw] flex-col border-r border-border bg-card p-4 shadow-xl">
             <div className="mb-4 flex items-center justify-between px-1">
               <div className="flex items-center gap-2">
                 <span className="text-sm font-semibold tracking-wide text-foreground">Construct</span>
