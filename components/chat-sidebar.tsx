@@ -29,6 +29,7 @@ interface ChatSidebarProps {
   onSelect: (id: string) => void
   onNewChat: (mode: Mode) => void
   onDelete: (id: string) => void
+  onExport?: (id: string) => void
   onCreateSchema: () => void
   onEditSchema: (id: string) => void
   onDeleteSchema: (id: string) => void
@@ -62,6 +63,7 @@ export function ChatSidebar({
   onSelect,
   onNewChat,
   onDelete,
+  onExport,
   onCreateSchema,
   onEditSchema,
   onDeleteSchema,
@@ -148,6 +150,23 @@ export function ChatSidebar({
             </span>
           )}
         </button>
+        {t.mode === 'sql' && onExport && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation()
+              onExport(t.id)
+            }}
+            aria-label="Export queries"
+            title="Download all SQL queries"
+            className="rounded-md p-1 text-muted-foreground opacity-80 transition-opacity hover:bg-primary/10 hover:text-primary md:opacity-0 md:group-hover:opacity-100"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path d="M12 3v12m0 0l4-4m-4 4L8 11" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        )}
         <button
           type="button"
           onClick={(e) => {

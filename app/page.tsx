@@ -5,12 +5,14 @@ import { useRouter } from 'next/navigation'
 import { ChatMessage } from '@/components/chat-message'
 import { ChatInput } from '@/components/chat-input'
 import { ChatSidebar, type Mode, type SchemaSummary, type ThreadSummary } from '@/components/chat-sidebar'
+import { sanitizeDownloadBasename } from '@/lib/download'
 
 interface Message {
   id: string
   role: 'user' | 'assistant'
   content: string
   isSql?: boolean
+  sqlStatus?: string
 }
 
 interface Thread {
@@ -41,6 +43,13 @@ const ACTIVE_THREAD_STORAGE_KEY = 'construct.activeThreadId'
 const WELCOME_TEXT = 'Welcome to Construct...'
 const DEEPSEEK_SQL_PROVIDER = 'deepseek'
 const OLLAMA_SQL_PROVIDER = 'ollama'
+
+function formatSqlStatus(intent?: string | null, cached?: boolean): string | undefined {
+  if (cached) return 'Instant reply (cached)'
+  if (intent === 'refine') return 'Refining previous query'
+  if (intent === 'enhance') return 'Optimizing previous query'
+  return undefined
+}
 
 const SQL_MODEL_OPTIONS = [
   { id: DEEPSEEK_SQL_PROVIDER, title: 'DeepSeek-V4-Pro' },
@@ -88,6 +97,23 @@ function deriveTitle(text: string): string {
   return clean.length > 48 ? clean.slice(0, 48) + '…' : clean
 }
 
+function findUserPromptBefore(messages: Message[], index: number): string {
+  for (let i = index - 1; i >= 0; i -= 1) {
+    if (messages[i].role === 'user' && messages[i].content.trim()) {
+      return messages[i].content.trim()
+    }
+  }
+  return 'query'
+}
+
+function sqlDownloadFilenameForMessage(messages: Message[], index: number): string {
+  const sqlIndex =
+    messages.slice(0, index + 1).filter(m => m.role === 'assistant' && m.isSql && m.content.trim())
+      .length || 1
+  const base = sanitizeDownloadBasename(findUserPromptBefore(messages, index))
+  return `${base}-${sqlIndex}.sql`
+}
+
 // ---------------------------------------------------------------------------
 // API helpers
 // ---------------------------------------------------------------------------
@@ -110,6 +136,45 @@ async function apiSaveThread(thread: Thread): Promise<void> {
 async function apiDeleteThread(id: string): Promise<void> {
   const res = await fetch(`${API_URL}/threads/${id}`, { method: 'DELETE', credentials: 'include' })
   if (!res.ok) throw new Error(`Failed to delete thread: ${res.status}`)
+}
+
+function parseContentDispositionFilename(header: string | null, fallback: string): string {
+  if (!header) return fallback
+  const utf8Match = header.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1])
+    } catch {
+      return utf8Match[1]
+    }
+  }
+  const plainMatch = header.match(/filename="?([^";]+)"?/i)
+  return plainMatch?.[1]?.trim() || fallback
+}
+
+async function apiExportThreadSql(threadId: string, fallbackTitle: string): Promise<void> {
+  const res = await fetch(`${API_URL}/threads/${threadId}/export`, { credentials: 'include' })
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}))
+    throw new Error(
+      typeof errorData.detail === 'string'
+        ? errorData.detail
+        : `Export failed: ${res.status}`
+    )
+  }
+  const blob = await res.blob()
+  const filename = parseContentDispositionFilename(
+    res.headers.get('Content-Disposition'),
+    `${fallbackTitle.replace(/[^\w\-]+/g, '-').slice(0, 80) || 'queries'}.sql`
+  )
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(url)
 }
 
 async function apiMe(): Promise<AuthUser> {
@@ -420,6 +485,17 @@ export default function ChatPage() {
     })
   }
 
+  const handleExportThread = async (id: string) => {
+    const thread = threads.find(t => t.id === id)
+    if (!thread || thread.mode !== 'sql') return
+    try {
+      await apiExportThreadSql(id, thread.title)
+      setError(null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to export queries')
+    }
+  }
+
   const summaries: ThreadSummary[] = threads.map(t => ({
     id: t.id,
     title: t.title,
@@ -435,8 +511,9 @@ export default function ChatPage() {
     updatedAt: s.updatedAt,
   }))
 
-  const handleSendMessage = async (userMessage: string) => {
-    if (!active) {
+  const handleSendMessage = async (userMessage: string, threadOverride?: Thread) => {
+    const targetThread = threadOverride || active
+    if (!targetThread) {
       const starter = newThread('chat')
       setThreads(prev => [starter, ...prev])
       setActiveId(starter.id)
@@ -445,11 +522,27 @@ export default function ChatPage() {
       return
     }
 
-    if (active.mode === 'sql') {
-      await handleTextToSql(userMessage)
+    if (targetThread.mode === 'sql') {
+      await handleTextToSql(userMessage, targetThread)
     } else {
-      await handleChatStream(userMessage)
+      await handleChatStream(userMessage, targetThread)
     }
+  }
+
+  const handleEditUserMessage = async (messageId: string, newContent: string) => {
+    if (!active || activeThreadIsSending) return
+    const index = active.messages.findIndex(m => m.id === messageId)
+    if (index < 0 || active.messages[index].role !== 'user') return
+
+    const truncated: Thread = {
+      ...active,
+      messages: active.messages.slice(0, index),
+      updatedAt: nextUpdatedAt(active.updatedAt),
+    }
+
+    setThreads(prev => prev.map(t => (t.id === active.id ? truncated : t)))
+    setError(null)
+    await handleSendMessage(newContent, truncated)
   }
 
   const setThreadSending = useCallback((threadId: string, sending: boolean) => {
@@ -572,9 +665,10 @@ export default function ChatPage() {
     }
   }
 
-  const handleTextToSql = async (userMessage: string) => {
-    if (!active) return
-    if (!active.schemaId) {
+  const handleTextToSql = async (userMessage: string, threadOverride?: Thread) => {
+    const targetThread = threadOverride || active
+    if (!targetThread) return
+    if (!targetThread.schemaId) {
       setSqlThreadSchemaPickerOpen(true)
       setError('This SQL thread has no schema. Start a new SQL thread and choose a schema.')
       return
@@ -582,9 +676,9 @@ export default function ChatPage() {
 
     setError(null)
 
-    const activeThreadId = active.id
-  if (sendingThreads[activeThreadId]) return
-  setThreadSending(activeThreadId, true)
+    const activeThreadId = targetThread.id
+    if (sendingThreads[activeThreadId]) return
+    setThreadSending(activeThreadId, true)
     const userMsg: Message = { id: uid(), role: 'user', content: userMessage }
     const assistantId = uid()
     const assistantMsg: Message = {
@@ -593,14 +687,20 @@ export default function ChatPage() {
       content: '',
       isSql: true,
     }
-    const isFirstUserMessage = !active.messages.some(m => m.role === 'user')
+    const isFirstUserMessage = !targetThread.messages.some(m => m.role === 'user')
 
-    updateActive(t => ({
-      ...t,
-      title: isFirstUserMessage ? deriveTitle(userMessage) : t.title,
-      messages: [...t.messages, userMsg, assistantMsg],
-      updatedAt: nextUpdatedAt(t.updatedAt),
-    }))
+    setThreads(prev =>
+      prev.map(t =>
+        t.id === activeThreadId
+          ? {
+              ...t,
+              title: isFirstUserMessage ? deriveTitle(userMessage) : t.title,
+              messages: [...t.messages, userMsg, assistantMsg],
+              updatedAt: nextUpdatedAt(t.updatedAt),
+            }
+          : t
+      )
+    )
 
     const patchAssistant = (patch: Partial<Message>) => {
       setThreads(prev =>
@@ -619,7 +719,7 @@ export default function ChatPage() {
     }
 
     try {
-      const historyForApi = active.messages
+      const historyForApi = targetThread.messages
         .filter(m => m.content)
         .map(m => ({ role: m.role, content: m.content, isSql: !!m.isSql }))
         .concat([{ role: 'user', content: userMessage, isSql: false }])
@@ -630,8 +730,8 @@ export default function ChatPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           query: userMessage,
-          schemaId: active.schemaId,
-          model: active.sqlModel || DEEPSEEK_SQL_PROVIDER,
+          schemaId: targetThread.schemaId,
+          model: targetThread.sqlModel || DEEPSEEK_SQL_PROVIDER,
           threadId: activeThreadId,
           assistantMessageId: assistantId,
           messages: historyForApi,
@@ -644,7 +744,11 @@ export default function ChatPage() {
       }
 
       const data = await response.json()
-      patchAssistant({ content: data.sql, isSql: true })
+      patchAssistant({
+        content: data.sql,
+        isSql: true,
+        sqlStatus: formatSqlStatus(data.intent, data.cached),
+      })
     } catch (err) {
       const errorMessage =
         err instanceof Error ? err.message : 'SQL generation failed.'
@@ -872,6 +976,7 @@ export default function ChatPage() {
         }}
         onNewChat={handleNewChat}
         onDelete={handleDelete}
+        onExport={handleExportThread}
         onCreateSchema={handleCreateSchema}
         onEditSchema={handleEditSchema}
         onDeleteSchema={handleDeleteSchema}
@@ -884,13 +989,24 @@ export default function ChatPage() {
           {active && (
             <div className="mb-4 flex items-center justify-between gap-2">
               {active.mode === 'sql' && (
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <span className="rounded-full border border-border bg-background/50 px-3 py-1.5 text-xs font-medium text-foreground">
                     Schema: {schemaSummaries.find((schema) => schema.id === active.schemaId)?.title || 'Unknown schema'}
                   </span>
                   <span className="rounded-full border border-border bg-background/50 px-3 py-1.5 text-xs font-medium text-foreground">
                     Model: {formatSqlModelTitle(active.sqlModel)}
                   </span>
+                  <button
+                    type="button"
+                    onClick={() => void handleExportThread(active.id)}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-border bg-background/50 px-3 py-1.5 text-xs font-medium text-foreground transition-all hover:border-primary hover:bg-primary/10"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden>
+                      <path d="M12 3v12m0 0l4-4m-4 4L8 11" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+                      <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                    Export SQL
+                  </button>
                 </div>
               )}
               <button
@@ -941,17 +1057,37 @@ export default function ChatPage() {
                   ? findRetryPrompt(active.messages, index)
                   : null
 
+                const isSqlAssistant =
+                  message.role === 'assistant' &&
+                  !!message.isSql &&
+                  !!message.content.trim() &&
+                  !isAssistantError
+
                 return (
                   <ChatMessage
                     key={message.id}
                     role={message.role}
                     content={message.content}
                     isSql={message.isSql}
+                    statusHint={message.sqlStatus}
+                    sqlDownloadFilename={
+                      isSqlAssistant
+                        ? sqlDownloadFilenameForMessage(active.messages, index)
+                        : undefined
+                    }
                     isLoading={
                       activeThreadIsSending &&
                       message.role === 'assistant' &&
                       !message.content
                     }
+                    onEditResend={
+                      message.role === 'user' && message.content.trim()
+                        ? newContent => {
+                            void handleEditUserMessage(message.id, newContent)
+                          }
+                        : undefined
+                    }
+                    editDisabled={activeThreadIsSending}
                     onRetry={
                       retryPrompt
                         ? () => {

@@ -1,0 +1,1 @@
+"""MatrixChat backend application package."""
