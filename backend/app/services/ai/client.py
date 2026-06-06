@@ -1,4 +1,5 @@
 import asyncio
+import random
 from typing import Optional
 
 import httpx
@@ -75,6 +76,12 @@ def format_ai_error(response: httpx.Response) -> str:
     return f"{response.status_code} {response.reason_phrase}: {body}"
 
 
+def _retry_delay(attempt: int) -> float:
+    """Exponential backoff with full jitter to avoid thundering herd."""
+    base = AI_SERVICE_INITIAL_RETRY_DELAY_SECONDS * (2 ** attempt)
+    return random.uniform(0, base)
+
+
 async def post_ai_completion(client: httpx.AsyncClient, payload: dict) -> httpx.Response:
     url = build_ai_completion_url()
     headers = build_ai_headers()
@@ -91,7 +98,7 @@ async def post_ai_completion(client: httpx.AsyncClient, payload: dict) -> httpx.
             if attempt >= AI_SERVICE_MAX_RETRIES - 1:
                 raise
 
-        await asyncio.sleep(AI_SERVICE_INITIAL_RETRY_DELAY_SECONDS * (2**attempt))
+        await asyncio.sleep(_retry_delay(attempt))
 
     if last_error is not None:
         raise last_error
